@@ -26,3 +26,4 @@ workspace/
 codex-schema-*/
 .claude/scheduled_tasks.lock
 .worktrees/
+.DS_Store

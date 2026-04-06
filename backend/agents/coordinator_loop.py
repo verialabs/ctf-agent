@@ -13,9 +13,9 @@ from backend.config import Settings
 from backend.cost_tracker import CostTracker
 from backend.deps import CoordinatorDeps
 from backend.models import DEFAULT_MODELS
-from backend.poller import CompetitionPoller
 from backend.platforms.base import CompetitionPlatformClient
 from backend.platforms.factory import create_platform_client
+from backend.poller import CompetitionPoller
 from backend.prompts import ChallengeMeta
 
 logger = logging.getLogger(__name__)

@@ -161,7 +161,7 @@ class LingxuEventCTFClient:
 
     def _platform_challenge_id_from_ref(self, challenge_ref: Any) -> int:
         if hasattr(challenge_ref, "platform_challenge_id"):
-            challenge_id = getattr(challenge_ref, "platform_challenge_id")
+            challenge_id = challenge_ref.platform_challenge_id
             if challenge_id is not None:
                 return int(challenge_id)
         if isinstance(challenge_ref, dict):
@@ -176,7 +176,7 @@ class LingxuEventCTFClient:
 
     def _event_id_from_ref(self, challenge_ref: Any) -> int:
         if hasattr(challenge_ref, "event_id"):
-            event_id = getattr(challenge_ref, "event_id")
+            event_id = challenge_ref.event_id
             if event_id is not None:
                 return int(event_id)
         if isinstance(challenge_ref, dict):
@@ -186,10 +186,7 @@ class LingxuEventCTFClient:
         return self.event_id
 
     def _challenge_rows(self, payload: Any) -> list[dict[str, Any]]:
-        if isinstance(payload, dict):
-            rows = payload.get("results", payload)
-        else:
-            rows = payload
+        rows = payload.get("results", payload) if isinstance(payload, dict) else payload
         if not isinstance(rows, list):
             raise RuntimeError("Lingxu challenge list payload is invalid")
         return [row for row in rows if isinstance(row, dict)]
@@ -322,9 +319,8 @@ class LingxuEventCTFClient:
         run_message = self._extract_message(run_payload)
         if run_response.status_code >= 400:
             raise RuntimeError(run_message or f"preflight run failed with HTTP {run_response.status_code}")
-        if isinstance(run_payload, dict):
-            if run_payload.get("error") or run_payload.get("status") == 3:
-                raise RuntimeError(run_message or "preflight run failed")
+        if isinstance(run_payload, dict) and (run_payload.get("error") or run_payload.get("status") == 3):
+            raise RuntimeError(run_message or "preflight run failed")
 
         addr_payload = await self._get(f"/event/{event_id}/ctf/{challenge_id}/addr/")
         connection_info = self._format_connection_info(addr_payload)

@@ -347,15 +347,19 @@ class CodexSolver:
                 # Proactive compaction at 70% context window (only for small-context models like spark)
                 context_window = token_usage.get("modelContextWindow")
                 total_tokens = total.get("totalTokens", 0)
-                if context_window and context_window < 200_000 and total_tokens > context_window * 0.7:
-                    if not self._compact_requested:
-                        self._compact_requested = True
-                        logger.info(f"[{self.agent_name}] Requesting compaction ({total_tokens}/{context_window} tokens)")
-                        try:
-                            await self._rpc("thread/compact/start", {"threadId": self._thread_id})
-                            self.tracer.event("compact_requested", tokens=total_tokens, window=context_window)
-                        except Exception as e:
-                            logger.warning(f"[{self.agent_name}] Compaction request failed: {e}")
+                if (
+                    context_window
+                    and context_window < 200_000
+                    and total_tokens > context_window * 0.7
+                    and not self._compact_requested
+                ):
+                    self._compact_requested = True
+                    logger.info(f"[{self.agent_name}] Requesting compaction ({total_tokens}/{context_window} tokens)")
+                    try:
+                        await self._rpc("thread/compact/start", {"threadId": self._thread_id})
+                        self.tracer.event("compact_requested", tokens=total_tokens, window=context_window)
+                    except Exception as e:
+                        logger.warning(f"[{self.agent_name}] Compaction request failed: {e}")
 
                 self.cost_tracker.record_tokens(
                     self.agent_name, self.model_id,
@@ -498,12 +502,11 @@ class CodexSolver:
                     return self._result(QUOTA_ERROR)
                 return self._result(ERROR)
 
-            if self._structured_output:
-                if self._structured_output.get("type") == "flag_found":
-                    self._flag = self._structured_output.get("flag")
-                    self._findings = f"Flag found via {self._structured_output.get('method', '?')}: {self._flag}"
-                    if self.no_submit:
-                        self._confirmed = True
+            if self._structured_output and self._structured_output.get("type") == "flag_found":
+                self._flag = self._structured_output.get("flag")
+                self._findings = f"Flag found via {self._structured_output.get('method', '?')}: {self._flag}"
+                if self.no_submit:
+                    self._confirmed = True
 
             if self._confirmed and self._flag:
                 return self._result(FLAG_FOUND)

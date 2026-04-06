@@ -14,7 +14,7 @@ from backend.cost_tracker import CostTracker
 from backend.ctfd import CTFdClient, SubmitResult
 from backend.deps import CoordinatorDeps
 from backend.platforms.lingxu_event_ctf import LingxuEventCTFClient
-from backend.poller import CTFdPoller, CompetitionPoller
+from backend.poller import CompetitionPoller, CTFdPoller
 from backend.prompts import ChallengeMeta
 
 
