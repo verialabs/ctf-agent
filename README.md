@@ -10,12 +10,12 @@
 
 该系统覆盖常见 CTF 题型，包括：
 
-- `pwn`
-- `rev`
-- `crypto`
-- `forensics`
-- `web`
-- `misc`
+1. `pwn`
+2. `rev`
+3. `crypto`
+4. `forensics`
+5. `web`
+6. `misc`
 
 ## 它是怎么工作的
 
@@ -389,7 +389,7 @@ uv run ctf-solve --coordinator none ...
 - `--coordinator claude` / `codex` 适合：
   - 你希望有顶层大模型持续查看 trace、广播提示、动态调度
 
-例如：
+  例如：
 
 ```bash
 uv run ctf-solve \
