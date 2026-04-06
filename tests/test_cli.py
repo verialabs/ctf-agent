@@ -5,6 +5,7 @@ import json
 import tomllib
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -13,6 +14,7 @@ from pydantic import ValidationError
 
 from backend import cli
 from backend.config import Settings
+from backend.solver_base import FLAG_FOUND, SolverResult
 
 
 def test_import_cmd_help_uses_english_options_with_chinese_help() -> None:
@@ -375,6 +377,249 @@ def test_settings_allow_non_positive_idle_seconds_when_policy_is_not_idle() -> N
 def test_settings_reject_non_positive_idle_seconds_when_policy_is_idle() -> None:
     with pytest.raises(ValidationError):
         Settings(all_solved_policy="idle", all_solved_idle_seconds=0)
+
+
+def _make_cli_settings(**overrides: Any) -> Settings:
+    values = {
+        "platform": "ctfd",
+        "platform_url": "",
+        "lingxu_event_id": 0,
+        "lingxu_cookie": "",
+        "lingxu_cookie_file": "",
+        "ctfd_url": "https://ctfd.example.com",
+        "ctfd_user": "admin",
+        "ctfd_pass": "password",
+        "ctfd_token": "token-1",
+    }
+    values.update(overrides)
+    return Settings(_env_file=None, **values)
+
+
+def _write_single_challenge_metadata(challenge_dir: Path, **overrides: Any) -> None:
+    metadata = {
+        "name": "demo",
+        "category": "misc",
+        "description": "single challenge regression",
+        "value": 100,
+        "platform": "lingxu-event-ctf",
+        "event_id": 198,
+        "platform_challenge_id": 42,
+        "requires_env_start": False,
+    }
+    metadata.update(overrides)
+    (challenge_dir / "metadata.yml").write_text(yaml.safe_dump(metadata), encoding="utf-8")
+
+
+def _make_solver_result(
+    *,
+    flag: str = "flag{demo}",
+    status: str = FLAG_FOUND,
+    model_spec: str = "codex/gpt-5.4",
+) -> SolverResult:
+    return SolverResult(
+        flag=flag,
+        status=status,
+        findings_summary="Recovered the real flag.",
+        step_count=4,
+        cost_usd=0.42,
+        log_path="trace.jsonl",
+        model_spec=model_spec,
+    )
+
+
+def _install_single_run_swarm(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    result: SolverResult | None,
+    confirmed_submit_status: str = "",
+    confirmed_submit_display: str = "",
+) -> None:
+    import backend.agents.swarm as swarm_module
+
+    class StubChallengeSwarm:
+        def __init__(self, **kwargs: Any) -> None:
+            self.challenge_dir = kwargs["challenge_dir"]
+            self.meta = kwargs["meta"]
+            self.confirmed_submit_status = confirmed_submit_status
+            self.confirmed_submit_display = confirmed_submit_display
+            self.confirmed_submit_message = ""
+            self.confirmed_flag = result.flag if result is not None else None
+
+        async def run(self) -> SolverResult | None:
+            return result
+
+    monkeypatch.setattr(swarm_module, "ChallengeSwarm", StubChallengeSwarm)
+
+
+class _FakeSingleRunPlatform:
+    def __init__(self) -> None:
+        self.released: list[Any] = []
+        self.closed = False
+
+    async def release_challenge_env(self, challenge_ref: Any) -> None:
+        self.released.append(challenge_ref)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def test_run_single_generates_writeup_in_solved_mode(monkeypatch, tmp_path: Path) -> None:
+    challenge_dir = tmp_path / "challenge"
+    challenge_dir.mkdir()
+    _write_single_challenge_metadata(challenge_dir, name="writeup-demo")
+    fake_platform = _FakeSingleRunPlatform()
+    writeup_calls: list[dict[str, Any]] = []
+
+    async def fake_cleanup_orphan_containers() -> None:
+        return None
+
+    def fake_configure_semaphore(limit: int) -> None:
+        return None
+
+    def fake_write_writeup(meta, challenge_dir, record, writeup_dir) -> Path:
+        path = Path(writeup_dir) / f"{meta.name}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"# {meta.name}\n{record['flag']}\n", encoding="utf-8")
+        writeup_calls.append({"meta": meta, "challenge_dir": challenge_dir, "record": record, "path": path})
+        return path
+
+    import backend.sandbox as sandbox_module
+
+    monkeypatch.setattr(cli, "create_platform_client", lambda settings: fake_platform)
+    monkeypatch.setattr(sandbox_module, "cleanup_orphan_containers", fake_cleanup_orphan_containers)
+    monkeypatch.setattr(sandbox_module, "configure_semaphore", fake_configure_semaphore)
+    monkeypatch.setattr("backend.writeups.write_writeup", fake_write_writeup)
+    _install_single_run_swarm(monkeypatch, result=_make_solver_result(flag="flag{writeup}"))
+
+    settings = _make_cli_settings(writeup_mode="solved", writeup_dir=str(tmp_path / "writeups"))
+
+    asyncio.run(
+        cli._run_single(
+            settings=settings,
+            challenge_dir=str(challenge_dir),
+            model_specs=["codex/gpt-5.4"],
+            no_submit=False,
+            max_challenges=1,
+        )
+    )
+
+    assert len(writeup_calls) == 1
+    assert writeup_calls[0]["challenge_dir"] == str(challenge_dir)
+    assert writeup_calls[0]["record"]["solve_status"] == FLAG_FOUND
+    assert writeup_calls[0]["record"]["writeup_status"] == "generated"
+    assert writeup_calls[0]["path"].exists()
+    assert fake_platform.released == []
+    assert fake_platform.closed is True
+
+
+def test_run_single_releases_platform_env_after_confirmed_submit(monkeypatch, tmp_path: Path) -> None:
+    challenge_dir = tmp_path / "challenge"
+    challenge_dir.mkdir()
+    _write_single_challenge_metadata(
+        challenge_dir,
+        name="release-demo",
+        requires_env_start=True,
+        platform_challenge_id=314,
+    )
+    fake_platform = _FakeSingleRunPlatform()
+
+    async def fake_cleanup_orphan_containers() -> None:
+        return None
+
+    def fake_configure_semaphore(limit: int) -> None:
+        return None
+
+    import backend.sandbox as sandbox_module
+
+    monkeypatch.setattr(cli, "create_platform_client", lambda settings: fake_platform)
+    monkeypatch.setattr(sandbox_module, "cleanup_orphan_containers", fake_cleanup_orphan_containers)
+    monkeypatch.setattr(sandbox_module, "configure_semaphore", fake_configure_semaphore)
+    _install_single_run_swarm(
+        monkeypatch,
+        result=_make_solver_result(flag="flag{release}"),
+        confirmed_submit_status="correct",
+        confirmed_submit_display='CORRECT — "flag{release}" accepted. accepted',
+    )
+
+    settings = _make_cli_settings(writeup_mode="off")
+
+    asyncio.run(
+        cli._run_single(
+            settings=settings,
+            challenge_dir=str(challenge_dir),
+            model_specs=["codex/gpt-5.4"],
+            no_submit=False,
+            max_challenges=1,
+        )
+    )
+
+    assert len(fake_platform.released) == 1
+    released_meta = fake_platform.released[0]
+    assert released_meta.name == "release-demo"
+    assert released_meta.platform_challenge_id == 314
+    assert released_meta.requires_env_start is True
+    assert fake_platform.closed is True
+
+
+def test_run_single_no_submit_skips_release_and_still_generates_solved_writeup(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    challenge_dir = tmp_path / "challenge"
+    challenge_dir.mkdir()
+    _write_single_challenge_metadata(
+        challenge_dir,
+        name="dry-run-demo",
+        requires_env_start=True,
+        platform_challenge_id=2718,
+    )
+    fake_platform = _FakeSingleRunPlatform()
+    writeup_calls: list[dict[str, Any]] = []
+
+    async def fake_cleanup_orphan_containers() -> None:
+        return None
+
+    def fake_configure_semaphore(limit: int) -> None:
+        return None
+
+    def fake_write_writeup(meta, challenge_dir, record, writeup_dir) -> Path:
+        path = Path(writeup_dir) / f"{meta.name}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(record["flag"] or "", encoding="utf-8")
+        writeup_calls.append({"record": record, "path": path})
+        return path
+
+    import backend.sandbox as sandbox_module
+
+    monkeypatch.setattr(cli, "create_platform_client", lambda settings: fake_platform)
+    monkeypatch.setattr(sandbox_module, "cleanup_orphan_containers", fake_cleanup_orphan_containers)
+    monkeypatch.setattr(sandbox_module, "configure_semaphore", fake_configure_semaphore)
+    monkeypatch.setattr("backend.writeups.write_writeup", fake_write_writeup)
+    _install_single_run_swarm(
+        monkeypatch,
+        result=_make_solver_result(flag="flag{dry-run}"),
+        confirmed_submit_status="correct",
+        confirmed_submit_display='CORRECT — "flag{dry-run}" accepted. accepted',
+    )
+
+    settings = _make_cli_settings(writeup_mode="solved", writeup_dir=str(tmp_path / "writeups"))
+
+    asyncio.run(
+        cli._run_single(
+            settings=settings,
+            challenge_dir=str(challenge_dir),
+            model_specs=["codex/gpt-5.4"],
+            no_submit=True,
+            max_challenges=1,
+        )
+    )
+
+    assert fake_platform.released == []
+    assert len(writeup_calls) == 1
+    assert writeup_calls[0]["record"]["solve_status"] == FLAG_FOUND
+    assert writeup_calls[0]["record"]["confirmed"] is True
+    assert writeup_calls[0]["path"].exists()
+    assert fake_platform.closed is True
 
 
 def test_run_single_uses_platform_factory_for_platform_client(monkeypatch, tmp_path: Path) -> None:

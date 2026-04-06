@@ -17,6 +17,25 @@ from backend.solve_lifecycle import finalize_swarm_result
 logger = logging.getLogger(__name__)
 
 
+def _record_skipped_challenge(deps: CoordinatorDeps, challenge_name: str, reason: str) -> None:
+    deps.results[challenge_name] = {
+        "flag": None,
+        "solve_status": "skipped",
+        "submit_status": "",
+        "submit_display": "",
+        "confirmed": False,
+        "winner_model": "",
+        "findings_summary": "",
+        "log_path": "",
+        "writeup_path": "",
+        "writeup_status": "skipped",
+        "writeup_error": "",
+        "env_cleanup_status": "skipped",
+        "env_cleanup_error": "",
+        "skip_reason": reason,
+    }
+
+
 def _connection_host(target: str) -> str:
     text = target.strip()
     if not text:
@@ -66,15 +85,22 @@ def _needs_prepare(meta: ChallengeMeta) -> bool:
 
 
 async def do_fetch_challenges(deps: CoordinatorDeps) -> str:
+    from backend.agents.coordinator_loop import _effective_solved_names
+
     challenges = await deps.ctfd.fetch_all_challenges()
-    solved = await deps.ctfd.fetch_solved_names()
+    platform_solved = await deps.ctfd.fetch_solved_names()
+    handled = _effective_solved_names(deps, platform_solved)
     result = [
         {
             "name": ch.get("name", "?"),
             "category": ch.get("category", "?"),
             "value": ch.get("value", 0),
             "solves": ch.get("solves", 0),
-            "status": "SOLVED" if ch.get("name") in solved else "unsolved",
+            "status": (
+                "SKIPPED"
+                if deps.results.get(ch.get("name", "?"), {}).get("solve_status") == "skipped"
+                else ("SOLVED" if ch.get("name") in handled else "unsolved")
+            ),
             "description": (ch.get("description") or "")[:200],
         }
         for ch in challenges
@@ -83,9 +109,23 @@ async def do_fetch_challenges(deps: CoordinatorDeps) -> str:
 
 
 async def do_get_solve_status(deps: CoordinatorDeps) -> str:
-    solved = await deps.ctfd.fetch_solved_names()
+    from backend.agents.coordinator_loop import _effective_solved_names
+
+    platform_solved = await deps.ctfd.fetch_solved_names()
+    solved = _effective_solved_names(deps, platform_solved)
+    skipped = sorted(
+        name for name, record in deps.results.items() if record.get("solve_status") == "skipped"
+    )
     swarm_status = {name: swarm.get_status() for name, swarm in deps.swarms.items()}
-    return json.dumps({"solved": sorted(solved), "active_swarms": swarm_status}, indent=2)
+    return json.dumps(
+        {
+            "solved": sorted(solved),
+            "platform_solved": sorted(platform_solved),
+            "skipped": skipped,
+            "active_swarms": swarm_status,
+        },
+        indent=2,
+    )
 
 
 async def do_spawn_swarm(deps: CoordinatorDeps, challenge_name: str) -> str:
@@ -125,6 +165,7 @@ async def do_spawn_swarm(deps: CoordinatorDeps, challenge_name: str) -> str:
         meta = ChallengeMeta.from_yaml(Path(deps.challenge_dirs[challenge_name]) / "metadata.yml")
         deps.challenge_metas[challenge_name] = meta
     if meta.unsupported_reason:
+        _record_skipped_challenge(deps, challenge_name, meta.unsupported_reason)
         logger.info("challenge_skipped_unsupported name=%s reason=%s", challenge_name, meta.unsupported_reason)
         return f"Challenge '{challenge_name}' skipped: {meta.unsupported_reason}"
     if _needs_prepare(meta):
@@ -135,6 +176,7 @@ async def do_spawn_swarm(deps: CoordinatorDeps, challenge_name: str) -> str:
         meta = ChallengeMeta.from_yaml(Path(deps.challenge_dirs[challenge_name]) / "metadata.yml")
         deps.challenge_metas[challenge_name] = meta
         if meta.unsupported_reason:
+            _record_skipped_challenge(deps, challenge_name, meta.unsupported_reason)
             logger.info("challenge_skipped_unsupported name=%s reason=%s", challenge_name, meta.unsupported_reason)
             return f"Challenge '{challenge_name}' skipped: {meta.unsupported_reason}"
 

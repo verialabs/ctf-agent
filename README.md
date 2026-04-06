@@ -306,6 +306,7 @@ uv run ctf-solve \
 - 不传 `--challenge` 时，`ctf-solve` 会进入 **协调器模式**。
 - 协调器会自动发现未解题，并在容量允许时启动 swarm。
 - `--coordinator none` 表示不用顶层大模型总控，只保留自动拉题、自动起 swarm、自动监控状态。
+- 这个模式特别适合你不想额外占用总控并发、只想依赖 swarm 自动把整场比赛持续跑下去的场景。
 - `--max-challenges 3` 表示最多同时处理 3 道题。
 - 实际 solver 并发大约是：`max_challenges * 模型数`。
 - 如果 `--coordinator` 是 `claude` 或 `codex`，还会额外多占用 1 个顶层协调器并发。
@@ -356,7 +357,7 @@ uv run ctf-solve \
 - 现网凌虚平台只要 `sessionid` 可用即可；浏览器里看不到 `csrftoken` 属于正常情况。
 - 进入赛段页面后，程序会自动读取题单、自动拉取题面和附件。
 - 对需要环境的题目，平台适配器会在求解前自动尝试准备连接信息；一般不需要你先手动逐题点“开启环境”。
-- `--no-submit` 只是不真的提交 flag，不会阻止自动拉题、自动起 swarm、自动准备环境。
+- `--no-submit` 只是不真的提交 flag，不会阻止自动拉题、自动起 swarm、自动准备环境，但也不会触发平台确认后的自动释放环境。
 
 ### 用法 3：切换协调器后端
 
@@ -378,10 +379,12 @@ uv run ctf-solve --coordinator none ...
 - `--coordinator claude` 时，协调器默认模型是 `claude-opus-4-6`
 - `--coordinator codex` 时，代码里实际默认模型是 `gpt-5.4`
 - `--coordinator none` 时，不会再调用顶层协调器模型，只保留平台轮询、自动拉题、自动起 swarm、自动停题
+- 即使是 `--coordinator none`，`--all-solved-policy` 自动收尾、平台确认后的环境释放、以及 `--writeup-mode` writeup 生成也都照常生效。
 - `--coordinator-model` 可以覆盖默认协调器模型
 - `--coordinator none` 适合：
   - 你本机没有装 Claude / Codex 作为总控
   - 你的网关并发比较紧张
+  - 你不想额外占用总控并发，只想让 swarm 自动跑完整场
   - 你只想稳定自动跑整场，不追求顶层策略调度
 - `--coordinator claude` / `codex` 适合：
   - 你希望有顶层大模型持续查看 trace、广播提示、动态调度
@@ -564,6 +567,97 @@ uv run ctf-solve \
 - 调试 Docker 沙箱
 - 观察 solver trace
 
+补充说明：
+
+- `--no-submit` 不会自动释放平台环境，因为没有真实提交，也就没有平台确认成功这一步。
+- `--writeup-mode confirmed` 依赖平台确认提交成功；在 dry-run / `--no-submit` 下通常不会生成 writeup。
+- `--writeup-mode solved` 则按本地解题结果生成 writeup；即使 dry-run，只要 solver 真正解出题，也会落盘，并在复现备注里写明“未自动提交，需人工确认”。
+- 当你同时使用 `--all-solved-policy exit` 或 `idle` 时，dry-run 模式下本地已解结果也会参与“是否全解”的判断，适合自动化回归整场流程。
+
+### 用法 10：自动收尾、环境释放与 writeup
+
+这几项能力现在可以单独组合使用，不依赖 `--coordinator claude` 或 `--coordinator codex`；即使使用 `--coordinator none`，也同样支持自动收尾、环境释放和 writeup。
+
+`--all-solved-policy` 用于控制“整场题都解完之后怎么办”：
+
+- `wait`：默认值。即使当前已全部解出，也继续轮询平台，等待新题或人工停止。
+- `exit`：确认当前已无未解题、且没有活动 swarm 后，协调器立即退出。
+- `idle`：先进入空闲观察期；如果持续空闲达到 `--all-solved-idle-seconds`，再退出。
+
+`--all-solved-idle-seconds` 只在 `--all-solved-policy idle` 时生效，并且必须大于 `0`。
+
+`--writeup-mode` 用于控制 writeup 何时生成：
+
+- `off`：关闭 writeup。
+- `confirmed`：只有平台确认 flag 正确后才生成 writeup，适合正式比赛归档。
+- `solved`：只要 solver 本地解出题就生成 writeup；dry-run / `--no-submit` 也会生成，但会明确标注尚未自动提交。
+
+`--writeup-dir` 用于指定 writeup 输出根目录；实际写入路径会按平台和赛事再拆一层，例如 `--writeup-dir writeups` 时，文件会写到 `writeups/lingxu-event-ctf-198/<challenge>.md`。如果你传 `--writeup-dir writeups/custom-root`，则最终路径会变成 `writeups/custom-root/lingxu-event-ctf-198/<challenge>.md`。
+
+环境释放的触发条件要分清：
+
+- 只有平台确认提交成功，且题目元信息里 `requires_env_start: true`，才会自动释放环境。
+- 环境题也是在平台确认正确后才会触发自动释放，不会因为“本地看起来解出来了”就提前释放。
+- `--no-submit` 不自动释放环境，因为不会产生平台确认成功结果。
+- 非环境题即使提交成功，只要 `requires_env_start: false`，也不会调用自动释放。
+
+三个贴近当前项目真实用法的示例：
+
+正式打凌虚赛事，全部解出后立即退出，平台确认成功时自动释放环境，并把 writeup 落到独立目录：
+
+```bash
+uv run ctf-solve \
+  --platform lingxu-event-ctf \
+  --platform-url https://ctf.yunyansec.com \
+  --lingxu-event-id 198 \
+  --lingxu-cookie-file .secrets/lingxu.cookie \
+  --coordinator none \
+  --models azure/gpt-5.4 \
+  --models azure/gpt-5.4-mini \
+  --max-challenges 3 \
+  --all-solved-policy exit \
+  --writeup-mode confirmed \
+  --writeup-dir writeups \
+  --msg-port 9400 \
+  -v
+```
+
+跑 CTFd 整场但不想额外占用总控并发，全部题目解完后先空闲 10 分钟再退出：
+
+```bash
+uv run ctf-solve \
+  --ctfd-url https://ctf.example.com \
+  --ctfd-token ctfd_your_token \
+  --coordinator none \
+  --models azure/gpt-5.4 \
+  --models azure/gpt-5.4-mini \
+  --max-challenges 3 \
+  --all-solved-policy idle \
+  --all-solved-idle-seconds 600 \
+  --writeup-mode confirmed \
+  --writeup-dir writeups/ctfd-main \
+  --msg-port 9400 \
+  -v
+```
+
+对凌虚赛事做整场 dry-run 回归，不提交 flag、不自动释放环境，但仍按本地解题结果生成 writeup：
+
+```bash
+uv run ctf-solve \
+  --platform lingxu-event-ctf \
+  --platform-url https://ctf.yunyansec.com \
+  --lingxu-event-id 198 \
+  --lingxu-cookie-file .secrets/lingxu.cookie \
+  --coordinator none \
+  --models azure/gpt-5.4-mini \
+  --no-submit \
+  --all-solved-policy idle \
+  --all-solved-idle-seconds 300 \
+  --writeup-mode solved \
+  --writeup-dir tmp-writeups \
+  -v
+```
+
 ## 常用命令速查
 
 ```bash
@@ -693,10 +787,14 @@ tail -f logs/trace-*.jsonl
 | `--models` | 指定 solver 模型，可重复传入 |
 | `--challenge` | 指定本地单题目录，启用单题模式 |
 | `--challenges-dir` | 题目保存目录，默认 `challenges` |
-| `--no-submit` | 干跑，不真的提交 flag |
+| `--no-submit` | 干跑，不真的提交 flag；不会触发平台确认后的自动释放环境 |
 | `--coordinator-model` | 覆盖协调器模型 |
 | `--coordinator` | 选择协调器后端：`claude`、`codex` 或 `none` |
 | `--max-challenges` | 同时求解的题目上限 |
+| `--all-solved-policy` | 全部题目已解后的收尾策略：`wait`、`exit`、`idle` |
+| `--all-solved-idle-seconds` | 当 `--all-solved-policy idle` 时的空闲超时秒数，必须大于 `0` |
+| `--writeup-mode` | writeup 生成策略：`off`、`confirmed`、`solved` |
+| `--writeup-dir` | writeup 输出目录 |
 | `--msg-port` | 协调器消息端口；`0` 表示自动分配 |
 | `-v, --verbose` | 打开更详细日志 |
 
@@ -747,6 +845,11 @@ tail -f logs/trace-*.jsonl
 - `--challenge` 模式需要你本地已经有 `metadata.yml`，不是只给一个题目名字就能跑。
 - 如果你想用 `ctf-msg`，最好固定 `--msg-port`，否则协调器端口是随机的。
 - `--coordinator none` 只去掉顶层总控，不会自动替你把默认 solver 模型从 `codex/...` / `claude-sdk/...` 改成 API 模型。
+- `--coordinator none` 适合不想占用总控并发、只靠 swarm 自动跑整场的场景；自动收尾、writeup 和平台确认后的环境释放仍然可用。
+- `--all-solved-policy idle` 必须配合大于 `0` 的 `--all-solved-idle-seconds`。
+- `--writeup-mode confirmed` 只有在平台确认提交成功后才会生成；`--writeup-mode solved` 则按本地解题结果生成，dry-run / `--no-submit` 也适用。
+- 自动释放环境只会发生在平台确认 flag 正确且 `requires_env_start: true` 的题目上；环境题也必须等平台确认正确后才会释放。
+- `--no-submit` 不自动释放环境。
 - 默认模型越多，同时启动的容器就越多，CPU / 内存 / Docker 压力会明显上升。
 - `distfiles` 是只读挂载，solver 生成的新文件应该写到 `/challenge/workspace/`。
 - prompt 中会把 `localhost` / `127.0.0.1` 重写为 `host.docker.internal`，便于容器访问宿主机上的题目服务。

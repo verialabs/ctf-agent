@@ -226,8 +226,10 @@ async def _run_single(
     """Run a single challenge with a swarm."""
     from backend.agents.swarm import ChallengeSwarm
     from backend.cost_tracker import CostTracker
+    from backend.deps import CoordinatorDeps
     from backend.prompts import ChallengeMeta
     from backend.sandbox import cleanup_orphan_containers, configure_semaphore
+    from backend.solve_lifecycle import finalize_swarm_result
 
     max_containers = max_challenges * len(model_specs)
     configure_semaphore(max_containers)
@@ -244,6 +246,15 @@ async def _run_single(
 
     platform_client = create_platform_client(settings)
     cost_tracker = CostTracker()
+    deps = CoordinatorDeps(
+        ctfd=platform_client,
+        cost_tracker=cost_tracker,
+        settings=settings,
+        model_specs=model_specs,
+        challenges_root=str(challenge_path.parent),
+        no_submit=no_submit,
+        max_concurrent_challenges=max_challenges,
+    )
 
     swarm = ChallengeSwarm(
         challenge_dir=str(challenge_path),
@@ -257,6 +268,14 @@ async def _run_single(
 
     try:
         result = await swarm.run()
+        await finalize_swarm_result(
+            deps=deps,
+            challenge_name=meta.name,
+            challenge_dir=str(challenge_path),
+            meta=meta,
+            swarm=swarm,
+            result=result,
+        )
         from backend.solver_base import FLAG_FOUND
 
         if result and result.status == FLAG_FOUND:

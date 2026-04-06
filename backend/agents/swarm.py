@@ -44,10 +44,7 @@ def _quota_fallback_spec(model_spec: str) -> str | None:
 
 
 def _submit_result_text(result: object, field: str) -> str:
-    if isinstance(result, dict):
-        value = result.get(field, "")
-    else:
-        value = getattr(result, field, "")
+    value = result.get(field, "") if isinstance(result, dict) else getattr(result, field, "")
     if value is None:
         return ""
     return str(value)

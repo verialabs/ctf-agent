@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -262,6 +263,28 @@ def test_all_solved_policy_uses_local_results_in_dry_run() -> None:
     assert solved_names == {"echo"}
     assert should_exit is True
     assert idle_since == 200.0
+
+
+def test_all_solved_policy_treats_skipped_results_as_handled() -> None:
+    deps = _make_policy_deps(all_solved_policy="exit")
+    deps.results["check-only"] = {
+        "solve_status": "skipped",
+        "skip_reason": "check mode is not supported in v1",
+    }
+
+    solved_names = coordinator_loop._effective_solved_names(deps, set())
+    should_exit, idle_since = coordinator_loop._evaluate_all_solved_policy(
+        deps=deps,
+        known_challenges={"check-only"},
+        known_solved=set(),
+        active_swarms=0,
+        now=220.0,
+        idle_since=None,
+    )
+
+    assert solved_names == {"check-only"}
+    assert should_exit is True
+    assert idle_since == 220.0
 
 
 @pytest.mark.asyncio
@@ -676,6 +699,22 @@ async def test_do_spawn_swarm_skips_unsupported_materialized_challenge(tmp_path:
 
     assert result == f"Challenge '{challenge_name}' skipped: check mode is not supported in v1"
     assert deps.swarms == {}
+    assert deps.results[challenge_name] == {
+        "flag": None,
+        "solve_status": "skipped",
+        "submit_status": "",
+        "submit_display": "",
+        "confirmed": False,
+        "winner_model": "",
+        "findings_summary": "",
+        "log_path": "",
+        "writeup_path": "",
+        "writeup_status": "skipped",
+        "writeup_error": "",
+        "env_cleanup_status": "skipped",
+        "env_cleanup_error": "",
+        "skip_reason": "check mode is not supported in v1",
+    }
 
 
 @pytest.mark.asyncio
@@ -900,6 +939,61 @@ async def test_do_submit_flag_prefers_challenge_meta_over_name() -> None:
 
     assert platform.seen_refs == [meta]
     assert result == 'CORRECT — "FLAG{real}" accepted. accepted'
+
+
+@pytest.mark.asyncio
+async def test_do_fetch_challenges_uses_effective_handled_view_for_skipped_and_dry_run_results() -> None:
+    platform = FakePlatform(
+        all_challenges=[
+            {"name": "check-only", "category": "web", "value": 100, "solves": 0, "description": "unsupported"},
+            {"name": "dry-run-win", "category": "misc", "value": 200, "solves": 0, "description": "local solve"},
+            {"name": "fresh", "category": "crypto", "value": 300, "solves": 0, "description": "unsolved"},
+        ],
+        solved_snapshots=[set()],
+    )
+    deps = CoordinatorDeps(
+        ctfd=platform,
+        cost_tracker=CostTracker(),
+        settings=make_settings(),
+        model_specs=[],
+        no_submit=True,
+    )
+    deps.results["check-only"] = {
+        "solve_status": "skipped",
+        "skip_reason": "check mode is not supported in v1",
+    }
+    deps.results["dry-run-win"] = {"solve_status": FLAG_FOUND}
+
+    payload = json.loads(await coordinator_core.do_fetch_challenges(deps))
+    statuses = {item["name"]: item["status"] for item in payload}
+
+    assert statuses["check-only"] == "SKIPPED"
+    assert statuses["dry-run-win"] == "SOLVED"
+    assert statuses["fresh"] == "unsolved"
+
+
+@pytest.mark.asyncio
+async def test_do_get_solve_status_reports_effective_handled_view() -> None:
+    platform = FakePlatform(solved_snapshots=[{"platform-solved"}])
+    deps = CoordinatorDeps(
+        ctfd=platform,
+        cost_tracker=CostTracker(),
+        settings=make_settings(),
+        model_specs=[],
+        no_submit=True,
+    )
+    deps.results["check-only"] = {
+        "solve_status": "skipped",
+        "skip_reason": "check mode is not supported in v1",
+    }
+    deps.results["dry-run-win"] = {"solve_status": FLAG_FOUND}
+
+    payload = json.loads(await coordinator_core.do_get_solve_status(deps))
+
+    assert payload["solved"] == ["check-only", "dry-run-win", "platform-solved"]
+    assert payload["platform_solved"] == ["platform-solved"]
+    assert payload["skipped"] == ["check-only"]
+    assert payload["active_swarms"] == {}
 
 
 @pytest.mark.asyncio

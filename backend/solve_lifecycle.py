@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
-from typing import Literal, TypedDict
+from typing import Any, Literal, TypedDict
 
 from backend.deps import CoordinatorDeps, ReleasedEnvKey
 from backend.prompts import ChallengeMeta

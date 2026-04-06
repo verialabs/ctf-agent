@@ -67,6 +67,11 @@ def build_deps(
 def _effective_solved_names(deps: CoordinatorDeps, known_solved: set[str]) -> set[str]:
     """Return the solved-name view used by all-solved exit policies."""
     effective = set(known_solved)
+    effective |= {
+        name
+        for name, record in deps.results.items()
+        if record.get("solve_status") == "skipped"
+    }
     if deps.no_submit:
         effective |= {
             name
