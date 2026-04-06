@@ -6,8 +6,10 @@ import tomllib
 import urllib.request
 from pathlib import Path
 
+import pytest
 import yaml
 from click.testing import CliRunner
+from pydantic import ValidationError
 
 from backend import cli
 from backend.config import Settings
@@ -36,6 +38,10 @@ def test_main_help_uses_english_options_with_chinese_help() -> None:
     assert "codex" in result.output
     assert "none" in result.output
     assert "--lingxu-cookie-file" in result.output
+    assert "--all-solved-policy" in result.output
+    assert "--all-solved-idle-seconds" in result.output
+    assert "--writeup-mode" in result.output
+    assert "--writeup-dir" in result.output
     assert "--题目目录" not in result.output
 
 
@@ -228,6 +234,147 @@ def test_main_accepts_challenge_option(monkeypatch, tmp_path: Path) -> None:
     assert captured["challenge_dir"] == str(challenge_dir)
     assert captured["no_submit"] is True
     assert captured["max_challenges"] == 10
+
+
+def test_main_uses_environment_values_for_all_solved_and_writeup_options_when_cli_omits_them(
+    monkeypatch, tmp_path: Path
+) -> None:
+    challenge_dir = tmp_path / "demo"
+    challenge_dir.mkdir()
+    (challenge_dir / "metadata.yml").write_text("name: demo\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    async def fake_run_single(settings, challenge_dir, model_specs, no_submit, max_challenges):
+        captured["settings"] = settings
+        captured["challenge_dir"] = challenge_dir
+
+    def fake_asyncio_run(coro):
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    monkeypatch.setenv("ALL_SOLVED_POLICY", "idle")
+    monkeypatch.setenv("ALL_SOLVED_IDLE_SECONDS", "45")
+    monkeypatch.setenv("WRITEUP_MODE", "confirmed")
+    monkeypatch.setenv("WRITEUP_DIR", "env-notes")
+    monkeypatch.setattr(cli, "_run_single", fake_run_single)
+    monkeypatch.setattr(cli.asyncio, "run", fake_asyncio_run)
+
+    result = CliRunner().invoke(cli.main, ["--challenge", str(challenge_dir)])
+
+    assert result.exit_code == 0
+    settings = captured["settings"]
+    assert captured["challenge_dir"] == str(challenge_dir)
+    assert settings.all_solved_policy == "idle"
+    assert settings.all_solved_idle_seconds == 45
+    assert settings.writeup_mode == "confirmed"
+    assert settings.writeup_dir == "env-notes"
+    assert "All-solved policy: idle" in result.output
+    assert "Idle timeout: 45 seconds" in result.output
+    assert "Writeup mode: confirmed" in result.output
+    assert "Writeup dir: env-notes" in result.output
+
+
+def test_main_writes_all_solved_and_writeup_options_to_settings(monkeypatch, tmp_path: Path) -> None:
+    challenge_dir = tmp_path / "demo"
+    challenge_dir.mkdir()
+    (challenge_dir / "metadata.yml").write_text("name: demo\n", encoding="utf-8")
+    writeup_dir = Path("notes")
+    captured: dict[str, object] = {}
+
+    async def fake_run_single(settings, challenge_dir, model_specs, no_submit, max_challenges):
+        captured["settings"] = settings
+        captured["challenge_dir"] = challenge_dir
+
+    def fake_asyncio_run(coro):
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    monkeypatch.setattr(cli, "_run_single", fake_run_single)
+    monkeypatch.setattr(cli.asyncio, "run", fake_asyncio_run)
+
+    result = CliRunner().invoke(
+        cli.main,
+        [
+            "--challenge",
+            str(challenge_dir),
+            "--all-solved-policy",
+            "idle",
+            "--all-solved-idle-seconds",
+            "120",
+            "--writeup-mode",
+            "solved",
+            "--writeup-dir",
+            str(writeup_dir),
+        ],
+    )
+
+    assert result.exit_code == 0
+    settings = captured["settings"]
+    assert captured["challenge_dir"] == str(challenge_dir)
+    assert settings.all_solved_policy == "idle"
+    assert settings.all_solved_idle_seconds == 120
+    assert settings.writeup_mode == "solved"
+    assert settings.writeup_dir == str(writeup_dir)
+    assert "All-solved policy: idle" in result.output
+    assert "Idle timeout: 120 seconds" in result.output
+    assert "Writeup mode: solved" in result.output
+    assert f"Writeup dir: {writeup_dir}" in result.output
+
+
+def test_main_rejects_non_positive_idle_seconds_for_idle_policy(monkeypatch, tmp_path: Path) -> None:
+    challenge_dir = tmp_path / "demo"
+    challenge_dir.mkdir()
+    (challenge_dir / "metadata.yml").write_text("name: demo\n", encoding="utf-8")
+    called = False
+
+    async def fake_run_single(settings, challenge_dir, model_specs, no_submit, max_challenges):
+        nonlocal called
+        called = True
+
+    def fake_asyncio_run(coro):
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    monkeypatch.setattr(cli, "_run_single", fake_run_single)
+    monkeypatch.setattr(cli.asyncio, "run", fake_asyncio_run)
+    monkeypatch.setattr(cli, "validate_platform_settings", lambda settings: None)
+
+    result = CliRunner().invoke(
+        cli.main,
+        [
+            "--challenge",
+            str(challenge_dir),
+            "--all-solved-policy",
+            "idle",
+            "--all-solved-idle-seconds",
+            "0",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "--all-solved-idle-seconds 必须大于 0" in result.output
+    assert called is False
+
+
+def test_settings_allow_non_positive_idle_seconds_when_policy_is_not_idle() -> None:
+    settings = Settings(all_solved_policy="wait", all_solved_idle_seconds=0)
+
+    assert settings.all_solved_policy == "wait"
+    assert settings.all_solved_idle_seconds == 0
+
+
+def test_settings_reject_non_positive_idle_seconds_when_policy_is_idle() -> None:
+    with pytest.raises(ValidationError):
+        Settings(all_solved_policy="idle", all_solved_idle_seconds=0)
 
 
 def test_run_single_uses_platform_factory_for_platform_client(monkeypatch, tmp_path: Path) -> None:

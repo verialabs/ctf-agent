@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import click
+from pydantic import ValidationError
 from rich.console import Console
 
 from backend.challenge_import import (
@@ -15,7 +16,7 @@ from backend.challenge_import import (
     ManualChallengeImportSpec,
     import_manual_challenge,
 )
-from backend.config import Settings
+from backend.config import AllSolvedPolicy, Settings, WriteupMode
 from backend.models import DEFAULT_MODELS
 from backend.platforms import (
     PlatformConfigError,
@@ -82,6 +83,30 @@ def _setup_logging(verbose: bool = False) -> None:
     help="协调器后端；none 表示无总控整场模式",
 )
 @click.option("--max-challenges", default=10, type=int, help="最大并发题目数")
+@click.option(
+    "--all-solved-policy",
+    default=None,
+    type=click.Choice(["wait", "exit", "idle"]),
+    help="全部题目已解出后的处理策略：wait 持续等待，exit 直接退出，idle 空闲超时后退出",
+)
+@click.option(
+    "--all-solved-idle-seconds",
+    default=None,
+    type=int,
+    help="当全部题目已解出且策略为 idle 时的空闲超时秒数",
+)
+@click.option(
+    "--writeup-mode",
+    default=None,
+    type=click.Choice(["off", "confirmed", "solved"]),
+    help="writeup 生成模式：off 关闭，confirmed 在确认成功后生成，solved 在解题成功后生成",
+)
+@click.option(
+    "--writeup-dir",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="writeup 输出目录",
+)
 @click.option("--msg-port", default=0, type=int, help="操作员消息端口，0 表示自动选择")
 @click.option("-v", "--verbose", is_flag=True, help="输出详细日志")
 def main(
@@ -100,6 +125,10 @@ def main(
     coordinator_model: str | None,
     coordinator: str,
     max_challenges: int,
+    all_solved_policy: AllSolvedPolicy | None,
+    all_solved_idle_seconds: int | None,
+    writeup_mode: WriteupMode | None,
+    writeup_dir: Path | None,
     msg_port: int,
     verbose: bool,
 ) -> None:
@@ -109,7 +138,26 @@ def main(
     """
     _setup_logging(verbose)
 
-    settings = Settings(sandbox_image=image)
+    settings_kwargs: dict[str, object] = {"sandbox_image": image}
+    if all_solved_policy is not None:
+        settings_kwargs["all_solved_policy"] = all_solved_policy
+    if all_solved_idle_seconds is not None:
+        settings_kwargs["all_solved_idle_seconds"] = all_solved_idle_seconds
+    if writeup_mode is not None:
+        settings_kwargs["writeup_mode"] = writeup_mode
+    if writeup_dir is not None:
+        settings_kwargs["writeup_dir"] = str(writeup_dir)
+
+    if all_solved_policy == "idle" and all_solved_idle_seconds is not None and all_solved_idle_seconds <= 0:
+        raise click.ClickException("--all-solved-idle-seconds 必须大于 0")
+
+    try:
+        settings = Settings(**settings_kwargs)
+    except ValidationError as exc:
+        if "all_solved_idle_seconds" in str(exc):
+            raise click.ClickException("--all-solved-idle-seconds 必须大于 0") from exc
+        raise click.ClickException(str(exc)) from exc
+
     if platform:
         settings.platform = platform
     if platform_url:
@@ -143,6 +191,12 @@ def main(
     console.print(f"  Models: {', '.join(model_specs)}")
     console.print(f"  Image: {settings.sandbox_image}")
     console.print(f"  Max challenges: {max_challenges}")
+    console.print(f"  All-solved policy: {settings.all_solved_policy}")
+    if settings.all_solved_policy == "idle":
+        console.print(f"  Idle timeout: {settings.all_solved_idle_seconds} seconds")
+    console.print(f"  Writeup mode: {settings.writeup_mode}")
+    if settings.writeup_mode != "off":
+        console.print(f"  Writeup dir: {settings.writeup_dir}")
     console.print()
 
     if challenge:
