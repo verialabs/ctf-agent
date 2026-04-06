@@ -24,6 +24,7 @@ class SolverResult:
     step_count: int
     cost_usd: float
     log_path: str
+    model_spec: str = ""
 
 
 class SolverProtocol(Protocol):

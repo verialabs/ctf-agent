@@ -295,6 +295,7 @@ class Solver:
             step_count=run_steps if run_steps is not None else self._step_count[0],
             cost_usd=run_cost if run_cost is not None else cost,
             log_path=self.tracer.path,
+            model_spec=self.model_spec,
         )
 
     async def stop(self) -> None:

@@ -369,6 +369,7 @@ class ClaudeSolver:
             step_count=run_steps if run_steps is not None else self._step_count,
             cost_usd=run_cost if run_cost is not None else self._cost_usd,
             log_path=self.tracer.path,
+            model_spec=self.model_spec,
         )
 
     async def stop(self) -> None:

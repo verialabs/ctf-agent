@@ -535,6 +535,7 @@ class CodexSolver:
             findings_summary=self._findings[:2000],
             step_count=self._step_count,
             cost_usd=self._cost_usd, log_path=self.tracer.path,
+            model_spec=self.model_spec,
         )
 
     async def stop(self) -> None:
