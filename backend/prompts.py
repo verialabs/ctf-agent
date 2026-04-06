@@ -59,7 +59,11 @@ def list_distfiles(challenge_dir: str) -> list[str]:
     dist = Path(challenge_dir) / "distfiles"
     if not dist.exists():
         return []
-    return sorted(f.name for f in dist.iterdir() if f.is_file())
+    return sorted(
+        path.relative_to(dist).as_posix()
+        for path in dist.rglob("*")
+        if path.is_file()
+    )
 
 
 def _rewrite_connection_info(conn: str) -> str:
