@@ -20,6 +20,7 @@ dependencies = [
 [project.scripts]
 ctf-solve = "backend.cli:main"
 ctf-msg = "backend.cli:msg"
+ctf-import = "backend.cli:import_cmd"
 
 [build-system]
 requires = ["hatchling"]

@@ -10,8 +10,18 @@ from pathlib import Path
 import click
 from rich.console import Console
 
+from backend.challenge_import import (
+    ManualChallengeImportError,
+    ManualChallengeImportSpec,
+    import_manual_challenge,
+)
 from backend.config import Settings
 from backend.models import DEFAULT_MODELS
+from backend.platforms import (
+    PlatformConfigError,
+    create_platform_client,
+    validate_platform_settings,
+)
 
 console = Console()
 
@@ -29,19 +39,57 @@ def _setup_logging(verbose: bool = False) -> None:
 
 
 @click.command()
-@click.option("--ctfd-url", default=None, help="CTFd URL (overrides .env)")
-@click.option("--ctfd-token", default=None, help="CTFd API token (overrides .env)")
-@click.option("--image", default="ctf-sandbox", help="Docker sandbox image name")
-@click.option("--models", multiple=True, help="Model specs (default: all configured)")
-@click.option("--challenge", default=None, help="Solve a single challenge directory")
-@click.option("--challenges-dir", default="challenges", help="Directory for challenge files")
-@click.option("--no-submit", is_flag=True, help="Dry run — don't submit flags")
-@click.option("--coordinator-model", default=None, help="Model for coordinator (default: claude-opus-4-6)")
-@click.option("--coordinator", default="claude", type=click.Choice(["claude", "codex"]), help="Coordinator backend")
-@click.option("--max-challenges", default=10, type=int, help="Max challenges solved concurrently")
-@click.option("--msg-port", default=0, type=int, help="Operator message port (0 = auto)")
-@click.option("-v", "--verbose", is_flag=True, help="Verbose logging")
+@click.option(
+    "--platform",
+    default=None,
+    type=click.Choice(["ctfd", "lingxu-event-ctf"]),
+    help="题目来源平台，默认使用 ctfd",
+)
+@click.option(
+    "--platform-url",
+    default=None,
+    help="平台根地址；使用凌虚赛事 CTF 时必填",
+)
+@click.option(
+    "--lingxu-event-id",
+    default=None,
+    type=int,
+    help="凌虚赛事 ID；使用凌虚赛事 CTF 时必填",
+)
+@click.option(
+    "--lingxu-cookie",
+    default=None,
+    help="浏览器导出的凌虚 Cookie 原文",
+)
+@click.option(
+    "--lingxu-cookie-file",
+    default=None,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="从文件读取凌虚 Cookie，适合避免命令历史泄露",
+)
+@click.option("--ctfd-url", default=None, help="CTFd 地址，优先于 .env 配置")
+@click.option("--ctfd-token", default=None, help="CTFd API 令牌，优先于 .env 配置")
+@click.option("--image", default="ctf-sandbox", help="Docker 沙箱镜像名称")
+@click.option("--models", multiple=True, help="模型规格，可重复传入；默认使用全部已配置模型")
+@click.option("--challenge", default=None, help="只求解单个本地题目目录")
+@click.option("--challenges-dir", default="challenges", help="题目根目录")
+@click.option("--no-submit", is_flag=True, help="仅执行求解，不提交 flag")
+@click.option("--coordinator-model", default=None, help="协调器使用的模型；默认按后端选择")
+@click.option(
+    "--coordinator",
+    default="claude",
+    type=click.Choice(["claude", "codex"]),
+    help="协调器后端",
+)
+@click.option("--max-challenges", default=10, type=int, help="最大并发题目数")
+@click.option("--msg-port", default=0, type=int, help="操作员消息端口，0 表示自动选择")
+@click.option("-v", "--verbose", is_flag=True, help="输出详细日志")
 def main(
+    platform: str | None,
+    platform_url: str | None,
+    lingxu_event_id: int | None,
+    lingxu_cookie: str | None,
+    lingxu_cookie_file: Path | None,
     ctfd_url: str | None,
     ctfd_token: str | None,
     image: str,
@@ -55,23 +103,43 @@ def main(
     msg_port: int,
     verbose: bool,
 ) -> None:
-    """CTF Agent — multi-model solver swarm.
+    """CTF Agent 多模型题目求解入口。
 
-    Run without --challenge to start the full coordinator (Ctrl+C to stop).
+    不传 `--challenge` 时启动完整协调器，按 Ctrl+C 停止。
     """
     _setup_logging(verbose)
 
     settings = Settings(sandbox_image=image)
+    if platform:
+        settings.platform = platform
+    if platform_url:
+        settings.platform_url = platform_url
+    if lingxu_event_id is not None:
+        settings.lingxu_event_id = lingxu_event_id
+    if lingxu_cookie:
+        settings.lingxu_cookie = lingxu_cookie
+    if lingxu_cookie_file:
+        settings.lingxu_cookie_file = str(lingxu_cookie_file)
     if ctfd_url:
         settings.ctfd_url = ctfd_url
     if ctfd_token:
         settings.ctfd_token = ctfd_token
     settings.max_concurrent_challenges = max_challenges
 
+    try:
+        validate_platform_settings(settings)
+    except PlatformConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
+
     model_specs = list(models) if models else list(DEFAULT_MODELS)
 
     console.print("[bold]CTF Agent v2[/bold]")
-    console.print(f"  CTFd: {settings.ctfd_url}")
+    console.print(f"  Platform: {settings.platform}")
+    if settings.platform == "ctfd":
+        console.print(f"  CTFd: {settings.ctfd_url}")
+    else:
+        console.print(f"  Platform URL: {settings.platform_url}")
+        console.print(f"  Event ID: {settings.lingxu_event_id}")
     console.print(f"  Models: {', '.join(model_specs)}")
     console.print(f"  Image: {settings.sandbox_image}")
     console.print(f"  Max challenges: {max_challenges}")
@@ -80,7 +148,18 @@ def main(
     if challenge:
         asyncio.run(_run_single(settings, challenge, model_specs, no_submit, max_challenges))
     else:
-        asyncio.run(_run_coordinator(settings, model_specs, challenges_dir, no_submit, coordinator_model, coordinator, max_challenges, msg_port))
+        asyncio.run(
+            _run_coordinator(
+                settings,
+                model_specs,
+                challenges_dir,
+                no_submit,
+                coordinator_model,
+                coordinator,
+                max_challenges,
+                msg_port,
+            )
+        )
 
 
 async def _run_single(
@@ -93,7 +172,6 @@ async def _run_single(
     """Run a single challenge with a swarm."""
     from backend.agents.swarm import ChallengeSwarm
     from backend.cost_tracker import CostTracker
-    from backend.ctfd import CTFdClient
     from backend.prompts import ChallengeMeta
     from backend.sandbox import cleanup_orphan_containers, configure_semaphore
 
@@ -110,18 +188,13 @@ async def _run_single(
     meta = ChallengeMeta.from_yaml(meta_path)
     console.print(f"[bold]Challenge:[/bold] {meta.name} ({meta.category}, {meta.value} pts)")
 
-    ctfd = CTFdClient(
-        base_url=settings.ctfd_url,
-        token=settings.ctfd_token,
-        username=settings.ctfd_user,
-        password=settings.ctfd_pass,
-    )
+    platform_client = create_platform_client(settings)
     cost_tracker = CostTracker()
 
     swarm = ChallengeSwarm(
         challenge_dir=str(challenge_path),
         meta=meta,
-        ctfd=ctfd,
+        ctfd=platform_client,
         cost_tracker=cost_tracker,
         settings=settings,
         model_specs=model_specs,
@@ -131,6 +204,7 @@ async def _run_single(
     try:
         result = await swarm.run()
         from backend.solver_base import FLAG_FOUND
+
         if result and result.status == FLAG_FOUND:
             console.print(f"\n[bold green]FLAG FOUND:[/bold green] {result.flag}")
         else:
@@ -141,7 +215,7 @@ async def _run_single(
             console.print(f"  {agent_name}: {cost_tracker.format_usage(agent_name)}")
         console.print(f"  [bold]Total: ${cost_tracker.total_cost_usd:.2f}[/bold]")
     finally:
-        await ctfd.close()
+        await platform_client.close()
 
 
 async def _run_coordinator(
@@ -164,6 +238,7 @@ async def _run_coordinator(
 
     if coordinator_backend == "codex":
         from backend.agents.codex_coordinator import run_codex_coordinator
+
         results = await run_codex_coordinator(
             settings=settings,
             model_specs=model_specs,
@@ -174,6 +249,7 @@ async def _run_coordinator(
         )
     else:
         from backend.agents.claude_coordinator import run_claude_coordinator
+
         results = await run_claude_coordinator(
             settings=settings,
             model_specs=model_specs,
@@ -184,17 +260,17 @@ async def _run_coordinator(
         )
 
     console.print("\n[bold]Final Results:[/bold]")
-    for challenge, data in results.get("results", {}).items():
-        console.print(f"  {challenge}: {data.get('flag', 'no flag')}")
+    for challenge_name, data in results.get("results", {}).items():
+        console.print(f"  {challenge_name}: {data.get('flag', 'no flag')}")
     console.print(f"\n[bold]Total cost: ${results.get('total_cost_usd', 0):.2f}[/bold]")
 
 
 @click.command()
 @click.argument("message")
-@click.option("--port", default=9400, type=int, help="Coordinator message port")
-@click.option("--host", default="127.0.0.1", help="Coordinator host")
+@click.option("--port", default=9400, type=int, help="协调器消息端口")
+@click.option("--host", default="127.0.0.1", help="协调器主机地址")
 def msg(message: str, port: int, host: str) -> None:
-    """Send a message to the running coordinator."""
+    """向运行中的协调器发送消息。"""
     import json
     import urllib.request
 
@@ -209,10 +285,83 @@ def msg(message: str, port: int, host: str) -> None:
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read())
             console.print(f"[green]Sent:[/green] {data.get('queued', message[:200])}")
-    except Exception as e:
-        console.print(f"[red]Failed:[/red] {e}")
+    except Exception as exc:
+        console.print(f"[red]Failed:[/red] {exc}")
         console.print("Is the coordinator running?")
         sys.exit(1)
+
+
+def _count_imported_attachments(challenge_dir: Path) -> int:
+    distfiles_dir = challenge_dir / "distfiles"
+    if not distfiles_dir.exists():
+        return 0
+    return sum(1 for path in distfiles_dir.rglob("*") if path.is_file())
+
+
+@click.command(name="ctf-import")
+@click.option("--name", required=True, help="题目名称")
+@click.option("--category", required=True, help="题目类型")
+@click.option("--description", required=True, help="题目描述")
+@click.option("--connection-info", default="", help="连接信息，例如 URL 或 nc host port")
+@click.option(
+    "--attachment",
+    "attachments",
+    multiple=True,
+    type=click.Path(path_type=Path, exists=False),
+    help="单个附件文件，可重复传入",
+)
+@click.option(
+    "--attachment-dir",
+    "attachment_dirs",
+    multiple=True,
+    type=click.Path(path_type=Path, file_okay=False),
+    help="附件目录，会递归拷贝其中的文件",
+)
+@click.option(
+    "--output-dir",
+    default=Path("challenges"),
+    type=click.Path(path_type=Path, file_okay=False),
+    help="导入后的题目输出目录",
+)
+@click.option("--value", default=0, type=int, help="题目分值")
+@click.option("--tag", "tags", multiple=True, help="题目标签，可重复传入")
+@click.option("--hint", "hints", multiple=True, help="题目提示，可重复传入")
+def import_cmd(
+    name: str,
+    category: str,
+    description: str,
+    connection_info: str,
+    attachments: tuple[Path, ...],
+    attachment_dirs: tuple[Path, ...],
+    output_dir: Path,
+    value: int,
+    tags: tuple[str, ...],
+    hints: tuple[str, ...],
+) -> None:
+    """把手工整理的题目信息导入为本地题目目录。"""
+    try:
+        challenge_dir = import_manual_challenge(
+            ManualChallengeImportSpec(
+                name=name,
+                category=category,
+                description=description,
+                output_dir=output_dir,
+                connection_info=connection_info,
+                attachments=attachments,
+                attachment_dirs=attachment_dirs,
+                value=value,
+                tags=tags,
+                hints=hints,
+            )
+        )
+    except ManualChallengeImportError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo("导入成功：")
+    click.echo(f"题目名称：{name}")
+    click.echo(f"题目目录：{challenge_dir}")
+    click.echo(f"附件数量：{_count_imported_attachments(challenge_dir)}")
+    click.echo(f"连接信息：{'已写入' if connection_info.strip() else '未写入'}")
 
 
 if __name__ == "__main__":

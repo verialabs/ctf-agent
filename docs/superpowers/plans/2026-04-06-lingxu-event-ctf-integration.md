@@ -12,8 +12,8 @@
 
 ## 协作约束
 
-- 唯一明确的共享修改点是 `backend/cli.py`。另一线程已经在推进 `ctf-import` 和 `ctf-solve` / `ctf-msg` 中文参数化，本计划不要回退那部分改动。
-- 本计划内部的配置字段继续保持英文命名，例如 `Settings.platform_url`、`Settings.lingxu_event_id`；但 `backend/cli.py` 的对外参数名应与另一线程保持一致，统一使用中文 Click 选项。
+- 唯一明确的共享修改点是 `backend/cli.py`。另一线程已经在推进 `ctf-import` 以及 CLI 中文帮助文本整理，本计划不要回退那部分改动。
+- 本计划内部的配置字段继续保持英文命名，例如 `Settings.platform_url`、`Settings.lingxu_event_id`；`backend/cli.py` 的对外参数名也保持英文，仅帮助文本、README 和示例说明使用中文。
 - 执行 Task 6 前，先确认另一线程的 CLI 改动已经落地或已完成 rebase。检查命令只看差异，不做覆盖：
 
 ```bash
@@ -41,8 +41,8 @@ git log --oneline -- backend/cli.py
   - 校验通用 poller、协调器对 unsupported / preflight 的处理。
 - `tests/test_lingxu_event_ctf_client.py`
   - 校验凌虚客户端的认证头、题目映射、环境启动、提交结果归一化。
-- `tests/test_cli_platform_options.py`
-  - 校验 `ctf-solve` 中文参数中新增的凌虚平台选项与报错行为。
+- `tests/test_cli.py`
+  - 校验 `ctf-solve` 在保持英文参数的前提下接入凌虚平台选项，并输出中文帮助与报错。
 
 ### 修改文件
 
@@ -73,7 +73,7 @@ git log --oneline -- backend/cli.py
 - `backend/tools/flag.py`
   - 直接提交 fallback 路径改用 `challenge_ref`。
 - `backend/cli.py`
-  - 在中文 CLI 体系上新增凌虚平台选项，把对应值写入 `Settings`。
+  - 在英文参数 CLI 体系上新增凌虚平台选项，把对应值写入 `Settings`，并提供中文帮助文本。
 - `README.md`
   - 补一节“凌虚赛事 CTF 使用方式”，写清 Cookie 文件、限制范围、check 模式跳过和示例命令。
 
@@ -1368,14 +1368,14 @@ git add backend/platforms/lingxu_event_ctf.py backend/ctfd.py backend/agents/coo
 git commit -m "feat: add Lingxu preflight and metadata-based submission"
 ```
 
-### Task 6: 在中文 CLI 上接入凌虚参数，并补 README 与最终验证
+### Task 6: 在英文参数 CLI 上接入凌虚平台，并补 README 与最终验证
 
 **Files:**
 - Modify: `backend/cli.py`
 - Modify: `README.md`
-- Test: `tests/test_cli_platform_options.py`
+- Test: `tests/test_cli.py`
 
-- [ ] **Step 1: 先写失败的中文 CLI 选项测试**
+- [ ] **Step 1: 先写失败的英文参数 CLI 测试**
 
 ```python
 from pathlib import Path
@@ -1391,15 +1391,15 @@ def test_cli_rejects_lingxu_without_cookie() -> None:
     result = runner.invoke(
         main,
         [
-            "--平台", "lingxu-event-ctf",
-            "--平台地址", "https://lx.example.com",
-            "--凌虚赛事ID", "42",
-            "--不提交",
+            "--platform", "lingxu-event-ctf",
+            "--platform-url", "https://lx.example.com",
+            "--lingxu-event-id", "42",
+            "--no-submit",
         ],
     )
 
     assert result.exit_code != 0
-    assert "凌虚Cookie" in result.output or "lingxu_cookie" in result.output
+    assert "lingxu_cookie" in result.output
 
 
 def test_cli_accepts_lingxu_cookie_file(tmp_path: Path, monkeypatch) -> None:
@@ -1415,50 +1415,53 @@ def test_cli_accepts_lingxu_cookie_file(tmp_path: Path, monkeypatch) -> None:
     result = runner.invoke(
         main,
         [
-            "--平台", "lingxu-event-ctf",
-            "--平台地址", "https://lx.example.com",
-            "--凌虚赛事ID", "42",
-            "--凌虚Cookie文件", str(cookie_file),
-            "--不提交",
+            "--platform", "lingxu-event-ctf",
+            "--platform-url", "https://lx.example.com",
+            "--lingxu-event-id", "42",
+            "--lingxu-cookie-file", str(cookie_file),
+            "--no-submit",
         ],
     )
 
     assert result.exit_code == 0
 ```
 
-- [ ] **Step 2: 运行测试，确认中文 CLI 还没有这些平台参数**
+- [ ] **Step 2: 运行测试，确认 CLI 还没有这些平台参数或帮助文本不符合预期**
 
-Run: `uv run pytest tests/test_cli_platform_options.py -v`  
-Expected: FAIL with `No such option: --平台` or equivalent Click error
+Run: `uv run pytest tests/test_cli.py -v`  
+Expected: FAIL because Lingxu options or help text are not yet wired through the English-option CLI
 
-- [ ] **Step 3: 在保留另一线程中文 CLI 成果的前提下，把凌虚平台参数接进去，并补 README**
+- [ ] **Step 3: 在保留中文帮助与 README 成果的前提下，把凌虚平台参数接进英文 CLI，并补 README**
 
 ```python
 # backend/cli.py
 @click.command()
-@click.option("--平台", "platform", default="ctfd", type=click.Choice(["ctfd", "lingxu-event-ctf"]), help="题目来源平台")
-@click.option("--平台地址", "platform_url", default=None, help="平台根地址；凌虚模式必填")
-@click.option("--凌虚赛事ID", "lingxu_event_id", default=None, type=int, help="凌虚赛事 ID")
-@click.option("--凌虚Cookie", "lingxu_cookie", default=None, help="浏览器导出的 Cookie 原文")
-@click.option("--凌虚Cookie文件", "lingxu_cookie_file", type=click.Path(path_type=Path, dir_okay=False), default=None, help="包含 sessionid 与 csrftoken 的 Cookie 文件")
+@click.option("--platform", default=None, type=click.Choice(["ctfd", "lingxu-event-ctf"]), help="题目来源平台")
+@click.option("--platform-url", default=None, help="平台根地址；凌虚模式必填")
+@click.option("--lingxu-event-id", default=None, type=int, help="凌虚赛事 ID")
+@click.option("--lingxu-cookie", default=None, help="浏览器导出的 Cookie 原文")
+@click.option("--lingxu-cookie-file", type=click.Path(path_type=Path, dir_okay=False), default=None, help="包含 sessionid 与 csrftoken 的 Cookie 文件")
 def main(
-    platform: str,
+    platform: str | None,
     platform_url: str | None,
     lingxu_event_id: int | None,
     lingxu_cookie: str | None,
     lingxu_cookie_file: Path | None,
-    # 其余现有中文参数保持不变
+    # 其余现有英文参数保持不变
 ) -> None:
     _setup_logging(verbose)
 
-    settings = Settings(
-        sandbox_image=image,
-        platform=platform,
-        platform_url=platform_url or "",
-        lingxu_event_id=lingxu_event_id or 0,
-        lingxu_cookie=lingxu_cookie or "",
-        lingxu_cookie_file=str(lingxu_cookie_file) if lingxu_cookie_file else "",
-    )
+    settings = Settings(sandbox_image=image)
+    if platform:
+        settings.platform = platform
+    if platform_url:
+        settings.platform_url = platform_url
+    if lingxu_event_id is not None:
+        settings.lingxu_event_id = lingxu_event_id
+    if lingxu_cookie:
+        settings.lingxu_cookie = lingxu_cookie
+    if lingxu_cookie_file:
+        settings.lingxu_cookie_file = str(lingxu_cookie_file)
     if ctfd_url:
         settings.ctfd_url = ctfd_url
     if ctfd_token:
@@ -1487,32 +1490,32 @@ def main(
 
 ~~~bash
 uv run ctf-solve \
-  --平台 lingxu-event-ctf \
-  --平台地址 https://match.example.com \
-  --凌虚赛事ID 42 \
-  --凌虚Cookie文件 .secrets/lingxu.cookie \
-  --最大题目数 3 \
-  --不提交 \
-  --详细日志
+  --platform lingxu-event-ctf \
+  --platform-url https://match.example.com \
+  --lingxu-event-id 42 \
+  --lingxu-cookie-file .secrets/lingxu.cookie \
+  --max-challenges 3 \
+  --no-submit \
+  -v
 ~~~
 ~~~
 
 - [ ] **Step 4: 跑最终验证，确认 CLI、平台测试和静态检查都通过**
 
-Run: `uv run pytest tests/test_platform_factory.py tests/test_coordinator_platform_flow.py tests/test_lingxu_event_ctf_client.py tests/test_cli_platform_options.py -v`  
+Run: `uv run pytest tests/test_platform_factory.py tests/test_coordinator_platform_flow.py tests/test_lingxu_event_ctf_client.py tests/test_cli.py -v`  
 Expected: PASS with all tests passing
 
 Run: `uv run ruff check backend tests`  
 Expected: PASS with no lint errors
 
-Run: `uv run ctf-solve --平台 lingxu-event-ctf --平台地址 https://match.example.com --凌虚赛事ID 42 --凌虚Cookie文件 .secrets/lingxu.cookie --最大题目数 1 --不提交 --详细日志`  
+Run: `uv run ctf-solve --platform lingxu-event-ctf --platform-url https://match.example.com --lingxu-event-id 42 --lingxu-cookie-file .secrets/lingxu.cookie --max-challenges 1 --no-submit -v`  
 Expected: 真实联调时日志包含 `platform_login_validated`、新题列表和 unsupported / preflight 相关日志；如果 Cookie 失效，应在启动期直接失败而不是进入 coordinator 主循环
 
 - [ ] **Step 5: 提交这一小步**
 
 ```bash
-git add backend/cli.py README.md tests/test_cli_platform_options.py
-git commit -m "feat: wire Lingxu event CTF through Chinese CLI"
+git add backend/cli.py README.md tests/test_cli.py
+git commit -m "feat: wire Lingxu event CTF through english CLI options"
 ```
 
 ## Spec Coverage Check
@@ -1522,11 +1525,11 @@ git commit -m "feat: wire Lingxu event CTF through Chinese CLI"
 - 题目落地与 metadata 扩展字段：Task 4 覆盖 `platform`、`event_id`、`platform_challenge_id`、`test_type`、`answer_mode`、`requires_env_start`、`unsupported_reason`。
 - 环境题 preflight：Task 5 覆盖 `begin -> run -> addr -> metadata 更新`。
 - 提交流程：Task 5 覆盖基于 `ChallengeMeta` 的提交，不再依赖纯题目名。
-- CLI 与配置：Task 1 负责内部配置模型，Task 6 负责中文 CLI 接线。
+- CLI 与配置：Task 1 负责内部配置模型，Task 6 负责英文参数 CLI 接线与中文帮助文本。
 - 日志与真实联调：Task 6 最终 smoke 命令要求观察启动校验、unsupported 和 preflight 日志。
 
 ## 风险提示
 
-- `backend/cli.py` 与手动导入线程有共享改动面，必须在 Task 6 前先合并对方的中文化方案，再把凌虚参数增补进去。
-- `tests/test_cli_platform_options.py` 依赖最终的中文 Click 参数名；如果另一线程对命名做了微调，优先对齐最终 CLI，而不是保留这里的字面值。
+- `backend/cli.py` 与手动导入线程有共享改动面，必须在 Task 6 前先合并对方的中文帮助方案，再把凌虚参数增补进去。
+- `tests/test_cli.py` 依赖最终的英文 CLI 参数名；如果另一线程对命名做了微调，优先对齐最终 CLI，而不是保留这里的字面值。
 - 真实 Cookie 联调时不要把 `.secrets/lingxu.cookie` 提交进仓库；只在本地 smoke 使用。
