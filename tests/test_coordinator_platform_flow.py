@@ -142,6 +142,128 @@ def make_settings(**overrides: Any) -> Settings:
     return Settings(_env_file=None, **values)
 
 
+def _make_policy_deps(**overrides: Any) -> CoordinatorDeps:
+    no_submit = overrides.pop("no_submit", False)
+    return CoordinatorDeps(
+        ctfd=FakePlatform(),
+        cost_tracker=CostTracker(),
+        settings=make_settings(**overrides),
+        model_specs=[],
+        no_submit=no_submit,
+    )
+
+
+def test_all_solved_policy_wait_never_exits() -> None:
+    deps = _make_policy_deps(all_solved_policy="wait")
+
+    should_exit, idle_since = coordinator_loop._evaluate_all_solved_policy(
+        deps=deps,
+        known_challenges={"echo"},
+        known_solved={"echo"},
+        active_swarms=0,
+        now=100.0,
+        idle_since=None,
+    )
+
+    assert should_exit is False
+    assert idle_since is None
+
+
+def test_all_solved_policy_exit_exits_immediately() -> None:
+    deps = _make_policy_deps(all_solved_policy="exit")
+
+    should_exit, idle_since = coordinator_loop._evaluate_all_solved_policy(
+        deps=deps,
+        known_challenges={"echo"},
+        known_solved={"echo"},
+        active_swarms=0,
+        now=100.0,
+        idle_since=None,
+    )
+
+    assert should_exit is True
+    assert idle_since == 100.0
+
+
+def test_all_solved_policy_idle_waits_until_timeout_then_exits() -> None:
+    deps = _make_policy_deps(all_solved_policy="idle", all_solved_idle_seconds=30)
+
+    first_exit, idle_since = coordinator_loop._evaluate_all_solved_policy(
+        deps=deps,
+        known_challenges={"echo"},
+        known_solved={"echo"},
+        active_swarms=0,
+        now=100.0,
+        idle_since=None,
+    )
+    second_exit, second_idle_since = coordinator_loop._evaluate_all_solved_policy(
+        deps=deps,
+        known_challenges={"echo"},
+        known_solved={"echo"},
+        active_swarms=0,
+        now=130.0,
+        idle_since=idle_since,
+    )
+
+    assert first_exit is False
+    assert idle_since == 100.0
+    assert second_exit is True
+    assert second_idle_since == 100.0
+
+
+def test_all_solved_policy_idle_resets_when_new_challenge_or_active_swarm_appears() -> None:
+    deps = _make_policy_deps(all_solved_policy="idle", all_solved_idle_seconds=30)
+
+    _should_exit, idle_since = coordinator_loop._evaluate_all_solved_policy(
+        deps=deps,
+        known_challenges={"echo"},
+        known_solved={"echo"},
+        active_swarms=0,
+        now=100.0,
+        idle_since=None,
+    )
+    reset_for_new, idle_since = coordinator_loop._evaluate_all_solved_policy(
+        deps=deps,
+        known_challenges={"echo", "fresh"},
+        known_solved={"echo"},
+        active_swarms=0,
+        now=110.0,
+        idle_since=idle_since,
+    )
+    reset_for_active, reset_idle_since = coordinator_loop._evaluate_all_solved_policy(
+        deps=deps,
+        known_challenges={"echo"},
+        known_solved={"echo"},
+        active_swarms=1,
+        now=120.0,
+        idle_since=idle_since,
+    )
+
+    assert reset_for_new is False
+    assert idle_since is None
+    assert reset_for_active is False
+    assert reset_idle_since is None
+
+
+def test_all_solved_policy_uses_local_results_in_dry_run() -> None:
+    deps = _make_policy_deps(all_solved_policy="exit", no_submit=True)
+    deps.results["echo"] = {"solve_status": FLAG_FOUND}
+
+    solved_names = coordinator_loop._effective_solved_names(deps, set())
+    should_exit, idle_since = coordinator_loop._evaluate_all_solved_policy(
+        deps=deps,
+        known_challenges={"echo"},
+        known_solved=set(),
+        active_swarms=0,
+        now=200.0,
+        idle_since=None,
+    )
+
+    assert solved_names == {"echo"}
+    assert should_exit is True
+    assert idle_since == 200.0
+
+
 @pytest.mark.asyncio
 async def test_competition_poller_detects_new_and_solved_challenges() -> None:
     platform = FakePlatform(
@@ -294,6 +416,75 @@ async def test_run_event_loop_validates_platform_before_starting_poller(
     assert events[:3] == ["validate_access", "poller_start", "turn_fn"]
     assert "poller_stop" in events
     assert events[-1] == "close"
+
+
+@pytest.mark.asyncio
+async def test_run_event_loop_flushes_last_solved_message_before_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    platform = FakePlatform()
+    deps = CoordinatorDeps(
+        ctfd=platform,
+        cost_tracker=CostTracker(),
+        settings=make_settings(all_solved_policy="exit"),
+        model_specs=[],
+    )
+    turn_messages: list[str] = []
+
+    class Event:
+        def __init__(self, kind: str, challenge_name: str) -> None:
+            self.kind = kind
+            self.challenge_name = challenge_name
+
+    class FakePoller:
+        def __init__(self, ctfd: FakePlatform, interval_s: float) -> None:
+            assert interval_s == 5.0
+            self.ctfd = ctfd
+            self.known_challenges = {"echo"}
+            self.known_solved: set[str] = set()
+            self._delivered = False
+
+        async def start(self) -> None:
+            return None
+
+        async def stop(self) -> None:
+            return None
+
+        async def get_event(self, timeout: float = 1.0) -> Any:
+            if self._delivered:
+                return None
+            self._delivered = True
+            self.known_solved = {"echo"}
+            return Event("challenge_solved", "echo")
+
+        def drain_events(self) -> list[Any]:
+            return []
+
+    async def fake_start_msg_server(inbox: asyncio.Queue, port: int = 0) -> None:
+        return None
+
+    async def fake_auto_spawn_unsolved(_deps: CoordinatorDeps, _poller: Any) -> None:
+        return None
+
+    async def fake_turn_fn(message: str) -> None:
+        turn_messages.append(message)
+
+    monkeypatch.setattr(coordinator_loop, "CompetitionPoller", FakePoller)
+    monkeypatch.setattr(coordinator_loop, "_start_msg_server", fake_start_msg_server)
+    monkeypatch.setattr(coordinator_loop, "_auto_spawn_unsolved", fake_auto_spawn_unsolved)
+
+    result = await coordinator_loop.run_event_loop(
+        deps=deps,
+        ctfd=platform,
+        cost_tracker=deps.cost_tracker,
+        turn_fn=fake_turn_fn,
+        status_interval=9999,
+    )
+
+    assert result["results"] == {}
+    assert len(turn_messages) == 2
+    assert "Fetch challenges and spawn swarms for all unsolved." in turn_messages[0]
+    assert "SOLVED: 'echo' — swarm auto-killed." in turn_messages[1]
 
 
 @pytest.mark.asyncio

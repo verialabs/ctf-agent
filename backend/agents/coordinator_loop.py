@@ -17,6 +17,7 @@ from backend.platforms.base import CompetitionPlatformClient
 from backend.platforms.factory import create_platform_client
 from backend.poller import CompetitionPoller
 from backend.prompts import ChallengeMeta
+from backend.solver_base import FLAG_FOUND
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,46 @@ def build_deps(
     return ctfd, cost_tracker, deps
 
 
+def _effective_solved_names(deps: CoordinatorDeps, known_solved: set[str]) -> set[str]:
+    """Return the solved-name view used by all-solved exit policies."""
+    effective = set(known_solved)
+    if deps.no_submit:
+        effective |= {
+            name
+            for name, record in deps.results.items()
+            if record.get("solve_status") == FLAG_FOUND
+        }
+    return effective
+
+
+def _evaluate_all_solved_policy(
+    *,
+    deps: CoordinatorDeps,
+    known_challenges: set[str],
+    known_solved: set[str],
+    active_swarms: int,
+    now: float,
+    idle_since: float | None,
+) -> tuple[bool, float | None]:
+    """Decide whether the coordinator should exit after all challenges are solved."""
+    policy = getattr(deps.settings, "all_solved_policy", "wait")
+    solved_names = _effective_solved_names(deps, known_solved)
+    all_solved = bool(known_challenges) and known_challenges <= solved_names and active_swarms == 0
+
+    if policy == "wait":
+        return False, None
+    if not all_solved:
+        return False, None
+    if policy == "exit":
+        return True, now
+
+    if idle_since is None:
+        return False, now
+    if now - idle_since >= getattr(deps.settings, "all_solved_idle_seconds", 300):
+        return True, idle_since
+    return False, idle_since
+
+
 async def run_event_loop(
     deps: CoordinatorDeps,
     ctfd: CompetitionPlatformClient,
@@ -94,10 +135,11 @@ async def run_event_loop(
         len(poller.known_solved),
     )
 
-    unsolved = poller.known_challenges - poller.known_solved
+    solved_names = _effective_solved_names(deps, poller.known_solved)
+    unsolved = poller.known_challenges - solved_names
     initial_msg = (
         f"CTF is LIVE. {len(poller.known_challenges)} challenges, "
-        f"{len(poller.known_solved)} solved.\n"
+        f"{len(solved_names)} solved.\n"
         f"Unsolved: {sorted(unsolved) if unsolved else 'NONE'}\n"
         "Fetch challenges and spawn swarms for all unsolved."
     )
@@ -109,6 +151,7 @@ async def run_event_loop(
         await _auto_spawn_unsolved(deps, poller)
 
         last_status = asyncio.get_event_loop().time()
+        idle_since: float | None = None
 
         while True:
             events = []
@@ -162,7 +205,7 @@ async def run_event_loop(
             if now - last_status >= status_interval:
                 last_status = now
                 active = [n for n, t in deps.swarm_tasks.items() if not t.done()]
-                solved_set = poller.known_solved
+                solved_set = _effective_solved_names(deps, poller.known_solved)
                 unsolved_set = poller.known_challenges - solved_set
                 status_line = (
                     f"STATUS: {len(solved_set)} solved, {len(unsolved_set)} unsolved, "
@@ -178,6 +221,24 @@ async def run_event_loop(
                 msg = "\n\n".join(parts)
                 logger.info("Event -> coordinator: %s", msg[:200])
                 await turn_fn(msg)
+
+            now = asyncio.get_event_loop().time()
+            active_count = sum(1 for task in deps.swarm_tasks.values() if not task.done())
+            should_exit, idle_since = _evaluate_all_solved_policy(
+                deps=deps,
+                known_challenges=poller.known_challenges,
+                known_solved=poller.known_solved,
+                active_swarms=active_count,
+                now=now,
+                idle_since=idle_since,
+            )
+            if should_exit:
+                logger.info(
+                    "All challenges solved; policy=%s, active_swarms=%d, exiting coordinator loop",
+                    getattr(deps.settings, "all_solved_policy", "wait"),
+                    active_count,
+                )
+                break
 
     except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Coordinator shutting down...")
@@ -226,7 +287,7 @@ async def _auto_spawn_one(deps: CoordinatorDeps, challenge_name: str) -> None:
 
 async def _auto_spawn_unsolved(deps: CoordinatorDeps, poller) -> None:
     """Auto-spawn swarms for all unsolved challenges that don't have active swarms."""
-    unsolved = poller.known_challenges - poller.known_solved
+    unsolved = poller.known_challenges - _effective_solved_names(deps, poller.known_solved)
     for name in sorted(unsolved):
         await _auto_spawn_one(deps, name)
 
