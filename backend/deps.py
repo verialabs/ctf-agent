@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 
 # Type for the deduped submit callback: (flag) -> (display, is_confirmed)
 SubmitFn = Callable[[str], Coroutine[Any, Any, tuple[str, bool]]]
+ReleasedEnvKey = tuple[str, str, str, str]
 
 
 @dataclass
@@ -54,5 +55,6 @@ class CoordinatorDeps:
     swarms: dict[str, Any] = field(default_factory=dict)
     swarm_tasks: dict[str, asyncio.Task] = field(default_factory=dict)
     results: dict[str, dict] = field(default_factory=dict)
+    released_envs: set[ReleasedEnvKey] = field(default_factory=set)
     challenge_dirs: dict[str, str] = field(default_factory=dict)
     challenge_metas: dict[str, Any] = field(default_factory=dict)

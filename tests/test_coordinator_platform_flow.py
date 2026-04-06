@@ -9,6 +9,7 @@ import pytest
 
 import backend.agents.coordinator_core as coordinator_core
 import backend.agents.coordinator_loop as coordinator_loop
+import backend.agents.swarm as swarm_module
 from backend.config import Settings
 from backend.cost_tracker import CostTracker
 from backend.ctfd import CTFdClient, SubmitResult
@@ -16,6 +17,8 @@ from backend.deps import CoordinatorDeps
 from backend.platforms.lingxu_event_ctf import LingxuEventCTFClient
 from backend.poller import CompetitionPoller, CTFdPoller
 from backend.prompts import ChallengeMeta
+from backend.solve_lifecycle import finalize_swarm_result
+from backend.solver_base import FLAG_FOUND, SolverResult
 
 
 class FakePlatform:
@@ -26,6 +29,7 @@ class FakePlatform:
         all_challenges: list[dict[str, Any]] | None = None,
         events: list[str] | None = None,
         supports_challenge_materialization: bool = True,
+        release_error: Exception | None = None,
     ) -> None:
         self._stub_snapshots = list(stub_snapshots or [[]])
         self._solved_snapshots = list(solved_snapshots or [set()])
@@ -34,6 +38,8 @@ class FakePlatform:
         self._solved_index = 0
         self.events = events if events is not None else []
         self.supports_challenge_materialization = supports_challenge_materialization
+        self.released: list[Any] = []
+        self.release_error = release_error
 
     async def validate_access(self) -> None:
         self.events.append("validate_access")
@@ -60,8 +66,64 @@ class FakePlatform:
     async def submit_flag(self, challenge_ref: Any, flag: str) -> dict[str, Any]:
         return {"status": "incorrect", "challenge_ref": challenge_ref, "flag": flag}
 
+    async def release_challenge_env(self, challenge_ref: Any) -> None:
+        self.released.append(challenge_ref)
+        if self.release_error is not None:
+            raise self.release_error
+
     async def close(self) -> None:
         self.events.append("close")
+
+
+def _make_result(
+    *,
+    flag: str | None = "flag{demo}",
+    status: str = FLAG_FOUND,
+    findings_summary: str = "Recovered the real flag.",
+    model_spec: str = "codex/gpt-5.4",
+    log_path: str = "",
+) -> SolverResult:
+    return SolverResult(
+        flag=flag,
+        status=status,
+        findings_summary=findings_summary,
+        step_count=4,
+        cost_usd=0.42,
+        log_path=log_path,
+        model_spec=model_spec,
+    )
+
+
+def _install_stub_swarm(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    result: SolverResult | None,
+    confirmed_submit_status: str = "",
+    confirmed_submit_display: str = "",
+    confirmed_submit_message: str = "",
+    confirmed_flag: str | None = None,
+) -> None:
+    class StubChallengeSwarm:
+        def __init__(self, **kwargs: Any) -> None:
+            self.challenge_dir = kwargs["challenge_dir"]
+            self.meta = kwargs["meta"]
+            self.cancel_event = asyncio.Event()
+            self.solvers: dict[str, Any] = {}
+            self.confirmed_flag = confirmed_flag
+            self.confirmed_submit_status = confirmed_submit_status
+            self.confirmed_submit_display = confirmed_submit_display
+            self.confirmed_submit_message = confirmed_submit_message
+
+        async def run(self) -> SolverResult | None:
+            return result
+
+        def get_status(self) -> dict[str, Any]:
+            return {"challenge_name": self.meta.name}
+
+        def kill(self) -> None:
+            self.cancel_event.set()
+
+    monkeypatch.setattr(swarm_module, "ChallengeSwarm", StubChallengeSwarm)
 
 
 def make_settings(**overrides: Any) -> Settings:
@@ -647,3 +709,371 @@ async def test_do_submit_flag_prefers_challenge_meta_over_name() -> None:
 
     assert platform.seen_refs == [meta]
     assert result == 'CORRECT — "FLAG{real}" accepted. accepted'
+
+
+@pytest.mark.asyncio
+async def test_do_spawn_swarm_finalizes_release_and_writeup_on_confirmed_submit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    challenge_name = "echo"
+    challenge_dir = tmp_path / challenge_name
+    (challenge_dir / "distfiles").mkdir(parents=True)
+    (challenge_dir / "distfiles" / "echo.py").write_text("print('hello')\n", encoding="utf-8")
+
+    platform = FakePlatform()
+    deps = CoordinatorDeps(
+        ctfd=platform,
+        cost_tracker=CostTracker(),
+        settings=make_settings(writeup_mode="confirmed", writeup_dir=str(tmp_path / "writeups")),
+        model_specs=["codex/gpt-5.4"],
+    )
+    meta = ChallengeMeta(
+        name=challenge_name,
+        category="web",
+        value=100,
+        description="echo",
+        connection_info="nc gamebox.example.com 31337",
+        platform="lingxu-event-ctf",
+        event_id=198,
+        platform_challenge_id=137,
+        requires_env_start=True,
+    )
+    deps.challenge_dirs[challenge_name] = str(challenge_dir)
+    deps.challenge_metas[challenge_name] = meta
+
+    _install_stub_swarm(
+        monkeypatch,
+        result=_make_result(flag="flag{echo}"),
+        confirmed_submit_status="correct",
+        confirmed_submit_display='CORRECT — "flag{echo}" accepted. accepted',
+        confirmed_submit_message="accepted",
+        confirmed_flag="flag{echo}",
+    )
+
+    result = await coordinator_core.do_spawn_swarm(deps, challenge_name)
+    await deps.swarm_tasks[challenge_name]
+
+    record = deps.results[challenge_name]
+
+    assert result == f"Swarm spawned for {challenge_name} with 1 models"
+    assert platform.released == [meta]
+    assert record["solve_status"] == FLAG_FOUND
+    assert record["submit_status"] == "correct"
+    assert record["confirmed"] is True
+    assert record["env_cleanup_status"] == "released"
+    assert record["writeup_status"] == "generated"
+    assert Path(record["writeup_path"]).exists()
+
+
+@pytest.mark.asyncio
+async def test_do_spawn_swarm_no_submit_skips_release_but_still_generates_writeup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    challenge_name = "dry-run"
+    challenge_dir = tmp_path / challenge_name
+    (challenge_dir / "distfiles").mkdir(parents=True)
+
+    platform = FakePlatform()
+    deps = CoordinatorDeps(
+        ctfd=platform,
+        cost_tracker=CostTracker(),
+        settings=make_settings(writeup_mode="solved", writeup_dir=str(tmp_path / "writeups")),
+        model_specs=["codex/gpt-5.4"],
+        no_submit=True,
+    )
+    meta = ChallengeMeta(
+        name=challenge_name,
+        category="misc",
+        description="dry run",
+        connection_info="nc gamebox.example.com 31337",
+        platform="lingxu-event-ctf",
+        event_id=198,
+        platform_challenge_id=204,
+        requires_env_start=True,
+    )
+    deps.challenge_dirs[challenge_name] = str(challenge_dir)
+    deps.challenge_metas[challenge_name] = meta
+
+    _install_stub_swarm(monkeypatch, result=_make_result(flag="flag{dry-run}"))
+
+    await coordinator_core.do_spawn_swarm(deps, challenge_name)
+    await deps.swarm_tasks[challenge_name]
+
+    record = deps.results[challenge_name]
+    content = Path(record["writeup_path"]).read_text(encoding="utf-8")
+
+    assert platform.released == []
+    assert record["solve_status"] == FLAG_FOUND
+    assert record["env_cleanup_status"] == "skipped"
+    assert record["writeup_status"] == "generated"
+    assert "未自动提交" in content
+
+
+@pytest.mark.asyncio
+async def test_do_spawn_swarm_release_failure_does_not_drop_solve_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    challenge_name = "release-fail"
+    challenge_dir = tmp_path / challenge_name
+    (challenge_dir / "distfiles").mkdir(parents=True)
+
+    platform = FakePlatform(release_error=RuntimeError("cleanup boom"))
+    deps = CoordinatorDeps(
+        ctfd=platform,
+        cost_tracker=CostTracker(),
+        settings=make_settings(writeup_mode="confirmed", writeup_dir=str(tmp_path / "writeups")),
+        model_specs=["codex/gpt-5.4"],
+    )
+    meta = ChallengeMeta(
+        name=challenge_name,
+        category="pwn",
+        description="release fail",
+        connection_info="nc gamebox.example.com 31337",
+        platform="lingxu-event-ctf",
+        event_id=198,
+        platform_challenge_id=205,
+        requires_env_start=True,
+    )
+    deps.challenge_dirs[challenge_name] = str(challenge_dir)
+    deps.challenge_metas[challenge_name] = meta
+
+    _install_stub_swarm(
+        monkeypatch,
+        result=_make_result(flag="flag{release-fail}"),
+        confirmed_submit_status="correct",
+        confirmed_submit_display='CORRECT — "flag{release-fail}" accepted. accepted',
+        confirmed_submit_message="accepted",
+        confirmed_flag="flag{release-fail}",
+    )
+
+    await coordinator_core.do_spawn_swarm(deps, challenge_name)
+    await deps.swarm_tasks[challenge_name]
+
+    record = deps.results[challenge_name]
+
+    assert platform.released == [meta]
+    assert record["flag"] == "flag{release-fail}"
+    assert record["solve_status"] == FLAG_FOUND
+    assert record["env_cleanup_status"] == "failed"
+    assert "cleanup boom" in record["env_cleanup_error"]
+    assert record["writeup_status"] == "generated"
+
+
+@pytest.mark.asyncio
+async def test_do_spawn_swarm_writeup_failure_is_captured_without_raising(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    challenge_name = "writeup-fail"
+    challenge_dir = tmp_path / challenge_name
+    (challenge_dir / "distfiles").mkdir(parents=True)
+
+    platform = FakePlatform()
+    deps = CoordinatorDeps(
+        ctfd=platform,
+        cost_tracker=CostTracker(),
+        settings=make_settings(writeup_mode="solved", writeup_dir=str(tmp_path / "writeups")),
+        model_specs=["codex/gpt-5.4"],
+    )
+    meta = ChallengeMeta(
+        name=challenge_name,
+        category="web",
+        description="writeup fail",
+        platform="lingxu-event-ctf",
+        event_id=198,
+        platform_challenge_id=206,
+        requires_env_start=False,
+    )
+    deps.challenge_dirs[challenge_name] = str(challenge_dir)
+    deps.challenge_metas[challenge_name] = meta
+
+    _install_stub_swarm(monkeypatch, result=_make_result(flag="flag{writeup-fail}"))
+
+    def fake_write_writeup(*args: Any, **kwargs: Any) -> Path:
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr("backend.writeups.write_writeup", fake_write_writeup)
+
+    await coordinator_core.do_spawn_swarm(deps, challenge_name)
+    await deps.swarm_tasks[challenge_name]
+
+    record = deps.results[challenge_name]
+
+    assert record["flag"] == "flag{writeup-fail}"
+    assert record["solve_status"] == FLAG_FOUND
+    assert record["writeup_status"] == "failed"
+    assert "disk full" in record["writeup_error"]
+
+
+@pytest.mark.asyncio
+async def test_do_spawn_swarm_writes_minimal_record_when_swarm_returns_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    challenge_name = "no-result"
+    challenge_dir = tmp_path / challenge_name
+    (challenge_dir / "distfiles").mkdir(parents=True)
+
+    platform = FakePlatform()
+    deps = CoordinatorDeps(
+        ctfd=platform,
+        cost_tracker=CostTracker(),
+        settings=make_settings(writeup_mode="confirmed", writeup_dir=str(tmp_path / "writeups")),
+        model_specs=["codex/gpt-5.4"],
+    )
+    meta = ChallengeMeta(
+        name=challenge_name,
+        category="misc",
+        description="no result",
+        connection_info="nc gamebox.example.com 31337",
+        platform="lingxu-event-ctf",
+        event_id=198,
+        platform_challenge_id=207,
+        requires_env_start=True,
+    )
+    deps.challenge_dirs[challenge_name] = str(challenge_dir)
+    deps.challenge_metas[challenge_name] = meta
+
+    _install_stub_swarm(monkeypatch, result=None)
+
+    await coordinator_core.do_spawn_swarm(deps, challenge_name)
+    await deps.swarm_tasks[challenge_name]
+
+    record = deps.results[challenge_name]
+
+    assert record["flag"] is None
+    assert record["solve_status"] == "no_result"
+    assert record["submit_status"] == ""
+    assert record["writeup_status"] == "skipped"
+    assert record["env_cleanup_status"] == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_try_submit_flag_accepts_object_result_without_message_and_finalize_records_confirmation(
+    tmp_path: Path,
+) -> None:
+    class SubmitResultWithoutMessage:
+        def __init__(self, status: str, display: str) -> None:
+            self.status = status
+            self.display = display
+
+    class ObjectResultPlatform(FakePlatform):
+        async def submit_flag(self, challenge_ref: Any, flag: str) -> Any:
+            return SubmitResultWithoutMessage(
+                status="correct",
+                display=f'CORRECT — "{flag}" accepted.',
+            )
+
+    challenge_name = "real-submit"
+    challenge_dir = tmp_path / challenge_name
+    (challenge_dir / "distfiles").mkdir(parents=True)
+
+    platform = ObjectResultPlatform()
+    deps = CoordinatorDeps(
+        ctfd=platform,
+        cost_tracker=CostTracker(),
+        settings=make_settings(writeup_mode="confirmed", writeup_dir=str(tmp_path / "writeups")),
+        model_specs=["codex/gpt-5.4"],
+    )
+    meta = ChallengeMeta(
+        name=challenge_name,
+        category="web",
+        description="real submit path",
+        platform="lingxu-event-ctf",
+        event_id=198,
+        platform_challenge_id=301,
+        requires_env_start=True,
+        connection_info="nc gamebox.example.com 31337",
+    )
+    swarm = swarm_module.ChallengeSwarm(
+        challenge_dir=str(challenge_dir),
+        meta=meta,
+        ctfd=platform,
+        cost_tracker=deps.cost_tracker,
+        settings=deps.settings,
+        model_specs=["codex/gpt-5.4"],
+    )
+
+    display, confirmed = await swarm.try_submit_flag("flag{real-submit}", "codex/gpt-5.4")
+    record = await finalize_swarm_result(
+        deps=deps,
+        challenge_name=challenge_name,
+        challenge_dir=str(challenge_dir),
+        meta=meta,
+        swarm=swarm,
+        result=_make_result(flag="flag{real-submit}"),
+    )
+
+    assert confirmed is True
+    assert display == 'CORRECT — "flag{real-submit}" accepted.'
+    assert swarm.confirmed_submit_status == "correct"
+    assert swarm.confirmed_submit_display == 'CORRECT — "flag{real-submit}" accepted.'
+    assert swarm.confirmed_submit_message == ""
+    assert record["confirmed"] is True
+    assert record["submit_status"] == "correct"
+    assert record["submit_display"] == 'CORRECT — "flag{real-submit}" accepted.'
+    assert record["env_cleanup_status"] == "released"
+
+
+@pytest.mark.asyncio
+async def test_finalize_swarm_result_releases_same_named_challenges_with_distinct_platform_ids(
+    tmp_path: Path,
+) -> None:
+    challenge_name = "shared-name"
+    platform = FakePlatform()
+    deps = CoordinatorDeps(
+        ctfd=platform,
+        cost_tracker=CostTracker(),
+        settings=make_settings(writeup_mode="off", writeup_dir=str(tmp_path / "writeups")),
+        model_specs=["codex/gpt-5.4"],
+    )
+
+    class ConfirmedSwarm:
+        confirmed_submit_status = "correct"
+        confirmed_submit_display = "CORRECT"
+        confirmed_submit_message = "accepted"
+
+    first_dir = tmp_path / "first"
+    second_dir = tmp_path / "second"
+    (first_dir / "distfiles").mkdir(parents=True)
+    (second_dir / "distfiles").mkdir(parents=True)
+    first_meta = ChallengeMeta(
+        name=challenge_name,
+        platform="lingxu-event-ctf",
+        event_id=198,
+        platform_challenge_id=401,
+        requires_env_start=True,
+        connection_info="nc gamebox.example.com 31337",
+    )
+    second_meta = ChallengeMeta(
+        name=challenge_name,
+        platform="lingxu-event-ctf",
+        event_id=198,
+        platform_challenge_id=402,
+        requires_env_start=True,
+        connection_info="nc gamebox.example.com 31337",
+    )
+
+    first_record = await finalize_swarm_result(
+        deps=deps,
+        challenge_name=challenge_name,
+        challenge_dir=str(first_dir),
+        meta=first_meta,
+        swarm=ConfirmedSwarm(),
+        result=_make_result(flag="flag{first}"),
+    )
+    second_record = await finalize_swarm_result(
+        deps=deps,
+        challenge_name=challenge_name,
+        challenge_dir=str(second_dir),
+        meta=second_meta,
+        swarm=ConfirmedSwarm(),
+        result=_make_result(flag="flag{second}"),
+    )
+
+    assert first_record["env_cleanup_status"] == "released"
+    assert second_record["env_cleanup_status"] == "released"
+    assert platform.released == [first_meta, second_meta]

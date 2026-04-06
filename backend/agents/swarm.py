@@ -43,6 +43,16 @@ def _quota_fallback_spec(model_spec: str) -> str | None:
     return QUOTA_FALLBACK.get(model_spec)
 
 
+def _submit_result_text(result: object, field: str) -> str:
+    if isinstance(result, dict):
+        value = result.get(field, "")
+    else:
+        value = getattr(result, field, "")
+    if value is None:
+        return ""
+    return str(value)
+
+
 @dataclass
 class ChallengeSwarm:
     """Parallel solvers racing on one challenge."""
@@ -61,6 +71,9 @@ class ChallengeSwarm:
     findings: dict[str, str] = field(default_factory=dict)
     winner: SolverResult | None = None
     confirmed_flag: str | None = None
+    confirmed_submit_status: str = ""
+    confirmed_submit_display: str = ""
+    confirmed_submit_message: str = ""
     _flag_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _submit_count: dict[str, int] = field(default_factory=dict)  # per-model wrong submission count
     _submitted_flags: set[str] = field(default_factory=set)  # dedup exact flags
@@ -182,10 +195,20 @@ class ChallengeSwarm:
 
             self._submitted_flags.add(normalized)
 
-            from backend.tools.core import do_submit_flag
-            display, is_confirmed = await do_submit_flag(self.ctfd, self.meta, flag)
+            try:
+                submit_result = await self.ctfd.submit_flag(self.meta, normalized)
+                submit_status = _submit_result_text(submit_result, "status")
+                display = _submit_result_text(submit_result, "display")
+                submit_message = _submit_result_text(submit_result, "message")
+                is_confirmed = submit_status in ("correct", "already_solved")
+            except Exception as e:
+                display = f"submit_flag error: {e}"
+                is_confirmed = False
             if is_confirmed:
                 self.confirmed_flag = normalized
+                self.confirmed_submit_status = submit_status
+                self.confirmed_submit_display = display
+                self.confirmed_submit_message = submit_message
             else:
                 self._submit_count[model_spec] = wrong_count + 1
                 self._last_submit_time[model_spec] = time.monotonic()

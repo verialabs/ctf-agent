@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 from backend.deps import CoordinatorDeps
 from backend.prompts import ChallengeMeta
-from backend.solver_base import FLAG_FOUND
+from backend.solve_lifecycle import finalize_swarm_result
 
 logger = logging.getLogger(__name__)
 
@@ -154,12 +154,14 @@ async def do_spawn_swarm(deps: CoordinatorDeps, challenge_name: str) -> str:
 
     async def _run_and_cleanup() -> None:
         result = await swarm.run()
-        # Flag already submitted/confirmed by solver's submit_fn — just record the result
-        if result and result.status == FLAG_FOUND:
-            deps.results[challenge_name] = {
-                "flag": result.flag,
-                "submit": "DRY RUN" if deps.no_submit else "confirmed by solver",
-            }
+        await finalize_swarm_result(
+            deps=deps,
+            challenge_name=challenge_name,
+            challenge_dir=deps.challenge_dirs[challenge_name],
+            meta=meta,
+            swarm=swarm,
+            result=result,
+        )
 
     task = asyncio.create_task(_run_and_cleanup(), name=f"swarm-{challenge_name}")
     deps.swarm_tasks[challenge_name] = task
