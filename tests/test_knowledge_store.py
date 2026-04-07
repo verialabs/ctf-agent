@@ -57,6 +57,7 @@ def test_match_includes_lingxu_platform_knowledge_even_when_category_differs() -
         category="crypto",
         challenge_name="web2",
         applied_ids=set(),
+        platform="lingxu-event-ctf",
     )
 
     assert len(matched) == 1
@@ -79,3 +80,85 @@ def test_promote_category_rule_from_memory_as_exploit_pattern() -> None:
     assert len(promoted) == 1
     assert promoted[0].scope == "category"
     assert promoted[0].kind == "exploit_pattern"
+
+
+def test_upsert_keeps_distinct_entries_for_same_content_with_different_applicability() -> None:
+    store = KnowledgeStore()
+    web_entry = store.upsert(
+        scope="category",
+        kind="exploit_pattern",
+        content="same",
+        evidence="e1",
+        confidence=0.9,
+        source_challenge="c1",
+        applicability={"category": "web"},
+    )
+    crypto_entry = store.upsert(
+        scope="category",
+        kind="exploit_pattern",
+        content="same",
+        evidence="e2",
+        confidence=0.8,
+        source_challenge="c2",
+        applicability={"category": "crypto"},
+    )
+
+    matched_web = store.match(category="web", challenge_name="other", applied_ids=set())
+    matched_crypto = store.match(category="crypto", challenge_name="other", applied_ids=set())
+
+    assert web_entry.id != crypto_entry.id
+    assert [entry.id for entry in matched_web] == [web_entry.id]
+    assert [entry.id for entry in matched_crypto] == [crypto_entry.id]
+
+
+def test_match_requires_platform_context_for_platform_knowledge() -> None:
+    store = KnowledgeStore()
+    entry = store.upsert(
+        scope="platform",
+        kind="platform_rule",
+        content="always start env via begin/run/addr first",
+        evidence="observed across lingxu event tasks",
+        confidence=0.95,
+        source_challenge="hatephp",
+        applicability={"category": "web", "platform": "lingxu-event-ctf"},
+    )
+
+    matched_other_platform = store.match(
+        category="crypto",
+        challenge_name="web2",
+        applied_ids=set(),
+        platform="ctfd",
+    )
+    matched_lingxu = store.match(
+        category="crypto",
+        challenge_name="web2",
+        applied_ids=set(),
+        platform="lingxu-event-ctf",
+    )
+
+    assert matched_other_platform == []
+    assert len(matched_lingxu) == 1
+    assert matched_lingxu[0].id == entry.id
+
+
+def test_summary_for_respects_platform_filter() -> None:
+    store = KnowledgeStore()
+    store.upsert(
+        scope="platform",
+        kind="platform_rule",
+        content="always start env via begin/run/addr first",
+        evidence="observed across lingxu event tasks",
+        confidence=0.95,
+        source_challenge="hatephp",
+        applicability={"platform": "lingxu-event-ctf"},
+    )
+
+    assert (
+        store.summary_for(
+            category="misc",
+            challenge_name="target",
+            applied_ids=set(),
+            platform="ctfd",
+        )
+        == ""
+    )

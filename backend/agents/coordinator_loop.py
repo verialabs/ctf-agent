@@ -191,6 +191,14 @@ def _resolve_challenge_category(deps: CoordinatorDeps, challenge_name: str) -> s
     return ""
 
 
+def _resolve_challenge_platform(deps: CoordinatorDeps, challenge_name: str) -> str:
+    meta = deps.challenge_metas.get(challenge_name)
+    if meta and meta.platform:
+        return str(meta.platform).strip()
+    platform_name = getattr(deps.settings, "platform", "")
+    return str(platform_name).strip()
+
+
 async def run_event_loop(
     deps: CoordinatorDeps,
     ctfd: CompetitionPlatformClient,
@@ -287,10 +295,12 @@ async def run_event_loop(
                     if trace_events:
                         memory = deps.working_memory_store.apply_trace_events(challenge_name, trace_events)
                         category = _resolve_challenge_category(deps, challenge_name)
+                        platform_name = _resolve_challenge_platform(deps, challenge_name)
                         deps.knowledge_store.promote_from_memory(
                             challenge_name=challenge_name,
                             category=category,
                             memory=memory,
+                            platform=platform_name,
                         )
 
             # Detect finished swarms

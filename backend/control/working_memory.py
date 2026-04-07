@@ -58,8 +58,8 @@ class WorkingMemoryStore:
                 artifact = str(event.get("result", "")).strip()
                 if artifact and artifact not in memory.useful_artifacts:
                     memory.useful_artifacts.append(artifact)
-            if event_type == "tool_result" and "platform rule:" in str(event.get("result", "")):
-                finding = str(event.get("result", "")).strip()
+            if event_type == "tool_result":
+                finding = _extract_verified_finding(str(event.get("result", "")))
                 if finding and finding not in memory.verified_findings:
                     memory.verified_findings.append(finding)
         return memory
@@ -99,3 +99,14 @@ def _is_failed_submit_result(result: str) -> bool:
     ):
         return False
     return False
+
+
+def _extract_verified_finding(result: str) -> str:
+    finding = result.strip()
+    if not finding:
+        return ""
+    lowered = finding.lower()
+    prefixes = ("platform rule:", "category rule:", "exploit pattern:")
+    if any(marker in lowered for marker in prefixes):
+        return finding
+    return ""
