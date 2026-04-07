@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.config import Settings
+from backend.control.state import build_runtime_state_snapshot
 from backend.cost_tracker import CostTracker
 from backend.deps import CoordinatorDeps
 from backend.models import DEFAULT_MODELS
@@ -132,6 +133,11 @@ async def run_event_loop(
 
     # Start operator message HTTP endpoint
     msg_server = await _start_msg_server(deps.operator_inbox, deps.msg_port)
+    deps.runtime_state = build_runtime_state_snapshot(
+        deps,
+        poller,
+        asyncio.get_event_loop().time(),
+    )
 
     logger.info(
         "Coordinator starting: %d models, %d challenges, %d solved",
@@ -228,6 +234,7 @@ async def run_event_loop(
                 await turn_fn(msg)
 
             now = asyncio.get_event_loop().time()
+            deps.runtime_state = build_runtime_state_snapshot(deps, poller, now)
             active_count = sum(1 for task in deps.swarm_tasks.values() if not task.done())
             should_exit, idle_since = _evaluate_all_solved_policy(
                 deps=deps,

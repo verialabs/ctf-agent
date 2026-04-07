@@ -7,6 +7,7 @@ from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from backend.control.state import CompetitionState
 from backend.cost_tracker import CostTracker
 from backend.platforms.base import CompetitionPlatformClient
 from backend.sandbox import DockerSandbox
@@ -50,6 +51,7 @@ class CoordinatorDeps:
     msg_port: int = 0  # 0 = auto-pick free port
 
     # Runtime state
+    runtime_state: CompetitionState = field(default_factory=CompetitionState)
     coordinator_inbox: asyncio.Queue = field(default_factory=asyncio.Queue)
     operator_inbox: asyncio.Queue = field(default_factory=asyncio.Queue)
     swarms: dict[str, Any] = field(default_factory=dict)
