@@ -62,3 +62,5 @@ class CoordinatorDeps:
     released_envs: set[ReleasedEnvKey] = field(default_factory=set)
     challenge_dirs: dict[str, str] = field(default_factory=dict)
     challenge_metas: dict[str, Any] = field(default_factory=dict)
+    trace_offsets: dict[str, int] = field(default_factory=dict)
+    trace_pending_lines: dict[str, bytes] = field(default_factory=dict)

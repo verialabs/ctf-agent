@@ -26,21 +26,59 @@ logger = logging.getLogger(__name__)
 TurnFn = Callable[[str], Coroutine[Any, Any, None]]
 
 
-def _load_recent_trace_events(trace_path: str, limit: int = 50) -> list[dict]:
+def _load_incremental_trace_events(
+    trace_path: str,
+    trace_offsets: dict[str, int],
+    pending_lines: dict[str, bytes],
+) -> list[dict[str, Any]]:
     if not trace_path:
         return []
+    path = Path(trace_path)
     try:
-        lines = Path(trace_path).read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeDecodeError):
+        file_size = path.stat().st_size
+    except OSError:
+        trace_offsets.pop(trace_path, None)
+        pending_lines.pop(trace_path, None)
         return []
-    events: list[dict] = []
-    for line in lines[-limit:]:
-        if not line.strip():
+
+    offset = trace_offsets.get(trace_path, 0)
+    if offset < 0 or offset > file_size:
+        offset = 0
+        pending_lines.pop(trace_path, None)
+
+    try:
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            chunk = handle.read()
+            trace_offsets[trace_path] = handle.tell()
+    except OSError:
+        return []
+
+    if not chunk:
+        return []
+
+    events: list[dict[str, Any]] = []
+    buffer = pending_lines.get(trace_path, b"") + chunk
+    next_pending = b""
+    for raw_line in buffer.splitlines(keepends=True):
+        if not raw_line.endswith((b"\n", b"\r")):
+            next_pending = raw_line
+            continue
+        line = raw_line.strip()
+        if not line:
             continue
         try:
-            events.append(json.loads(line))
-        except json.JSONDecodeError:
+            payload = json.loads(line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
             continue
+        if isinstance(payload, dict):
+            events.append(payload)
+
+    if next_pending:
+        pending_lines[trace_path] = next_pending
+    else:
+        pending_lines.pop(trace_path, None)
+
     return events
 
 
@@ -215,7 +253,11 @@ async def run_event_loop(
                     if not tracer:
                         continue
                     trace_path = tracer.path if hasattr(tracer, "path") else str(tracer)
-                    trace_events = _load_recent_trace_events(trace_path)
+                    trace_events = _load_incremental_trace_events(
+                        trace_path,
+                        deps.trace_offsets,
+                        deps.trace_pending_lines,
+                    )
                     if trace_events:
                         deps.working_memory_store.apply_trace_events(challenge_name, trace_events)
 

@@ -364,6 +364,89 @@ def test_build_deps_accepts_platform_override_and_preloads_metadata(tmp_path: Pa
     assert deps.challenge_metas["Local Warmup"].value == 200
 
 
+def test_load_incremental_trace_events_ignores_invalid_jsonl_and_non_dict_rows(
+    tmp_path: Path,
+) -> None:
+    trace_path = tmp_path / "trace.jsonl"
+    trace_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "tool_result", "tool": "submit_flag", "result": "INCORRECT"}),
+                "not-json",
+                "{oops}",
+                json.dumps(["not", "a", "dict"]),
+                json.dumps("scalar"),
+                json.dumps({"type": "bump", "insights": "Try offset 7"}),
+                "",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    trace_offsets: dict[str, int] = {}
+    pending_lines: dict[str, bytes] = {}
+
+    events = coordinator_loop._load_incremental_trace_events(
+        str(trace_path),
+        trace_offsets,
+        pending_lines,
+    )
+
+    assert events == [
+        {"type": "tool_result", "tool": "submit_flag", "result": "INCORRECT"},
+        {"type": "bump", "insights": "Try offset 7"},
+    ]
+
+
+def test_load_incremental_trace_events_keeps_all_new_events_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    trace_path = tmp_path / "trace.jsonl"
+    trace_offsets: dict[str, int] = {}
+    pending_lines: dict[str, bytes] = {}
+
+    initial_batch = [{"type": "bump", "insights": f"hint-{idx}"} for idx in range(3)]
+    trace_path.write_text(
+        "".join(json.dumps(event) + "\n" for event in initial_batch),
+        encoding="utf-8",
+    )
+
+    first_events = coordinator_loop._load_incremental_trace_events(
+        str(trace_path),
+        trace_offsets,
+        pending_lines,
+    )
+    second_events = coordinator_loop._load_incremental_trace_events(
+        str(trace_path),
+        trace_offsets,
+        pending_lines,
+    )
+
+    assert first_events == initial_batch
+    assert second_events == []
+
+    large_batch = [{"type": "bump", "insights": f"hint-{idx}"} for idx in range(3, 133)]
+    with trace_path.open("a", encoding="utf-8") as handle:
+        for event in large_batch:
+            handle.write(json.dumps(event) + "\n")
+
+    third_events = coordinator_loop._load_incremental_trace_events(
+        str(trace_path),
+        trace_offsets,
+        pending_lines,
+    )
+    fourth_events = coordinator_loop._load_incremental_trace_events(
+        str(trace_path),
+        trace_offsets,
+        pending_lines,
+    )
+
+    assert len(third_events) == len(large_batch)
+    assert third_events == large_batch
+    assert fourth_events == []
+
+
 @pytest.mark.asyncio
 async def test_build_deps_default_ctfd_client_supports_validate_access(
     monkeypatch: pytest.MonkeyPatch,
