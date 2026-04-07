@@ -830,6 +830,7 @@ async def test_run_event_loop_promotes_verified_platform_rule_to_knowledge_store
         category="web",
         challenge_name="other-web",
         applied_ids=set(),
+        platform="ctfd",
     )
     assert len(matched) == 1
     assert matched[0].scope == "platform"

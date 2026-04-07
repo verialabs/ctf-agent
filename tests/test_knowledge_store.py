@@ -162,3 +162,53 @@ def test_summary_for_respects_platform_filter() -> None:
         )
         == ""
     )
+
+
+def test_promote_platform_rule_uses_platform_only_applicability() -> None:
+    store = KnowledgeStore()
+    memory = ChallengeWorkingMemory(
+        challenge_name="c1",
+        verified_findings=["platform rule: ctfd env has special header"],
+    )
+
+    promoted = store.promote_from_memory(
+        challenge_name="c1",
+        category="web",
+        platform="ctfd",
+        memory=memory,
+    )
+
+    assert len(promoted) == 1
+    assert promoted[0].scope == "platform"
+    assert promoted[0].kind == "platform_rule"
+    assert promoted[0].applicability == {"platform": "ctfd"}
+
+
+def test_platform_rule_does_not_match_on_wrong_platform_even_with_same_category() -> None:
+    store = KnowledgeStore()
+    memory = ChallengeWorkingMemory(
+        challenge_name="c1",
+        verified_findings=["platform rule: ctfd env has special header"],
+    )
+    promoted = store.promote_from_memory(
+        challenge_name="c1",
+        category="web",
+        platform="ctfd",
+        memory=memory,
+    )
+
+    matched_wrong_platform = store.match(
+        category="web",
+        challenge_name="other",
+        applied_ids=set(),
+        platform="lingxu-event-ctf",
+    )
+    matched_correct_platform = store.match(
+        category="web",
+        challenge_name="other",
+        applied_ids=set(),
+        platform="ctfd",
+    )
+
+    assert matched_wrong_platform == []
+    assert [item.id for item in matched_correct_platform] == [promoted[0].id]

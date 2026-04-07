@@ -169,8 +169,6 @@ class KnowledgeStore:
                 applicability["platform"] = platform
             elif "lingxu" in lower_finding:
                 applicability["platform"] = "lingxu-event-ctf"
-            if category:
-                applicability["category"] = category
             return self.upsert(
                 scope="platform",
                 kind="platform_rule",
@@ -231,6 +229,9 @@ def _entry_matches_applicability(entry: KnowledgeEntry, *, category: str, platfo
         or expected_platform == "*"
         or (bool(platform) and expected_platform == platform)
     )
+    if entry.kind == "platform_rule" and expected_platform:
+        return platform_matches
+
     expected_category = _norm(entry.applicability.get("category", ""))
     category_matches = (
         not expected_category
