@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from backend.control.state import CompetitionState
+from backend.control.working_memory import WorkingMemoryStore
 from backend.cost_tracker import CostTracker
 from backend.platforms.base import CompetitionPlatformClient
 from backend.sandbox import DockerSandbox
@@ -47,6 +48,7 @@ class CoordinatorDeps:
     challenges_root: str = "challenges"
     no_submit: bool = False
     max_concurrent_challenges: int = 10
+    working_memory_store: WorkingMemoryStore = field(default_factory=WorkingMemoryStore)
 
     msg_port: int = 0  # 0 = auto-pick free port
 

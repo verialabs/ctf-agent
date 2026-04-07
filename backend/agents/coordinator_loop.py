@@ -26,6 +26,24 @@ logger = logging.getLogger(__name__)
 TurnFn = Callable[[str], Coroutine[Any, Any, None]]
 
 
+def _load_recent_trace_events(trace_path: str, limit: int = 50) -> list[dict]:
+    if not trace_path:
+        return []
+    try:
+        lines = Path(trace_path).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return []
+    events: list[dict] = []
+    for line in lines[-limit:]:
+        if not line.strip():
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return events
+
+
 def build_deps(
     settings: Settings,
     model_specs: list[str] | None = None,
@@ -190,6 +208,16 @@ async def run_event_loop(
 
             now = asyncio.get_event_loop().time()
             deps.runtime_state = build_runtime_state_snapshot(deps, poller, now)
+
+            for challenge_name, swarm in deps.swarms.items():
+                for solver in swarm.solvers.values():
+                    tracer = getattr(solver, "tracer", None)
+                    if not tracer:
+                        continue
+                    trace_path = tracer.path if hasattr(tracer, "path") else str(tracer)
+                    trace_events = _load_recent_trace_events(trace_path)
+                    if trace_events:
+                        deps.working_memory_store.apply_trace_events(challenge_name, trace_events)
 
             # Detect finished swarms
             for name, task in list(deps.swarm_tasks.items()):
