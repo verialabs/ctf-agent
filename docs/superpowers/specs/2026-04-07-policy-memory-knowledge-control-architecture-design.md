@@ -33,6 +33,28 @@
 
 ---
 
+### 1.1 实现状态（截至 2026-04-07）
+
+这份设计文档以“目标形态”为主叙述，但对应的第一阶段控制面已经落地进代码，并接入共享 `backend/agents/coordinator_loop.py` 事件循环。
+
+已完成（已实现并接线）：
+
+- [x] 显式 `Runtime State`：`backend/control/state.py`（`CompetitionState / ChallengeState / SwarmState` + `build_runtime_state_snapshot`）
+- [x] `Working Memory`：`backend/control/working_memory.py`（trace 增量提炼、单题摘要）
+- [x] `Knowledge Store`：`backend/control/knowledge_store.py`（晋升、匹配、已应用保护）
+- [x] `Policy Engine`：`backend/control/policy_engine.py`（规则优先决策、动作列表生成）
+- [x] `Advisor` 接口：`backend/control/advisor.py`（以及 `backend/agents/{azure,claude,codex}_coordinator.py` 的 advisor 适配器）
+
+仍复用既有模块（本阶段不额外拆成新对象）：
+
+- 平台侧事实状态（`Platform State`）：继续由 `poller + platform client` 提供 `known_challenges/known_solved` 等平台事实，再由 runtime snapshot 汇总进入 `CompetitionState`。
+
+待后续（刻意未做）：
+
+- [ ] 更深的稳定性/容错重构（例如进一步状态机化、隔离 I/O 与纯决策、回放/审计工具链完善）
+- [ ] 递归式或多层 coordinator 架构（coordinator of coordinators）
+- [ ] 更复杂的长期知识库与检索（向量数据库、跨比赛持久化、RAG 等）
+
 ## 2. 设计目标
 
 1. 在不推翻现有 solver 与 swarm 主体实现的前提下，引入正式的控制面抽象。
