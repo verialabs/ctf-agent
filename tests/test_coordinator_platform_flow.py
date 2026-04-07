@@ -877,6 +877,79 @@ async def test_run_event_loop_continues_after_policy_action_failure(
 
 
 @pytest.mark.asyncio
+async def test_run_event_loop_cleans_up_when_initial_plan_tick_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    events: list[str] = []
+    platform = FakePlatform(events=events)
+    deps = CoordinatorDeps(
+        ctfd=platform,
+        cost_tracker=CostTracker(),
+        settings=make_settings(all_solved_policy="exit"),
+        model_specs=["azure/gpt-5.4"],
+    )
+
+    class FakePolicyEngine:
+        def plan_tick(self, **_: Any) -> list[Any]:
+            raise RuntimeError("plan tick boom")
+
+    class FakePoller:
+        def __init__(self, ctfd: FakePlatform, interval_s: float) -> None:
+            self.ctfd = ctfd
+            self.interval_s = interval_s
+            self.known_challenges = {"echo"}
+            self.known_solved = {"echo"}
+
+        async def start(self) -> None:
+            events.append("poller_start")
+
+        async def stop(self) -> None:
+            events.append("poller_stop")
+
+        async def get_event(self, timeout: float = 1.0) -> None:
+            return None
+
+        def drain_events(self) -> list[Any]:
+            return []
+
+    async def fake_turn_fn(message: str) -> None:
+        events.append("turn")
+        return None
+
+    async def fake_start_msg_server(inbox: asyncio.Queue, port: int = 0) -> None:
+        class StubServer:
+            def close(self) -> None:
+                events.append("server_close")
+
+            async def wait_closed(self) -> None:
+                events.append("server_wait_closed")
+
+        return StubServer()
+
+    deps.policy_engine = FakePolicyEngine()
+
+    monkeypatch.setattr(coordinator_loop, "CompetitionPoller", FakePoller)
+    monkeypatch.setattr(coordinator_loop, "_start_msg_server", fake_start_msg_server)
+
+    with caplog.at_level("ERROR"):
+        result = await coordinator_loop.run_event_loop(
+            deps=deps,
+            ctfd=platform,
+            cost_tracker=deps.cost_tracker,
+            turn_fn=fake_turn_fn,
+            status_interval=9999,
+    )
+
+    assert result["results"] == {}
+    assert "plan tick boom" in caplog.text
+    assert "server_close" in events
+    assert "server_wait_closed" in events
+    assert "poller_stop" in events
+    assert events[-1] == "close"
+
+
+@pytest.mark.asyncio
 async def test_run_event_loop_updates_working_memory_from_solver_traces(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

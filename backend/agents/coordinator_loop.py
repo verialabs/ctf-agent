@@ -215,47 +215,50 @@ async def run_event_loop(
         turn_fn: Async function that sends a message to the coordinator LLM.
         status_interval: Seconds between status updates.
     """
-    await ctfd.validate_access()
+    msg_server: asyncio.Server | Any | None = None
+    poller: CompetitionPoller | None = None
 
-    poller = CompetitionPoller(ctfd=ctfd, interval_s=5.0)
-    await poller.start()
+    try:
+        await ctfd.validate_access()
 
-    # Start operator message HTTP endpoint
-    msg_server = await _start_msg_server(deps.operator_inbox, deps.msg_port)
-    deps.runtime_state = build_runtime_state_snapshot(
-        deps,
-        poller,
-        asyncio.get_event_loop().time(),
-    )
-    initial_action_results = await _execute_policy_tick(
-        deps,
-        poller,
-        asyncio.get_event_loop().time(),
-    )
-    if initial_action_results:
+        poller = CompetitionPoller(ctfd=ctfd, interval_s=5.0)
+        await poller.start()
+
+        # Start operator message HTTP endpoint
+        msg_server = await _start_msg_server(deps.operator_inbox, deps.msg_port)
         deps.runtime_state = build_runtime_state_snapshot(
             deps,
             poller,
             asyncio.get_event_loop().time(),
         )
+        initial_action_results = await _execute_policy_tick(
+            deps,
+            poller,
+            asyncio.get_event_loop().time(),
+        )
+        if initial_action_results:
+            deps.runtime_state = build_runtime_state_snapshot(
+                deps,
+                poller,
+                asyncio.get_event_loop().time(),
+            )
 
-    logger.info(
-        "Coordinator starting: %d models, %d challenges, %d solved",
-        len(deps.model_specs),
-        len(poller.known_challenges),
-        len(poller.known_solved),
-    )
+        logger.info(
+            "Coordinator starting: %d models, %d challenges, %d solved",
+            len(deps.model_specs),
+            len(poller.known_challenges),
+            len(poller.known_solved),
+        )
 
-    solved_names = _effective_solved_names(deps, poller.known_solved)
-    unsolved = poller.known_challenges - solved_names
-    initial_msg = (
-        f"CTF is LIVE. {len(poller.known_challenges)} challenges, "
-        f"{len(solved_names)} solved.\n"
-        f"Unsolved: {sorted(unsolved) if unsolved else 'NONE'}\n"
-        "Fetch challenges and spawn swarms for all unsolved."
-    )
+        solved_names = _effective_solved_names(deps, poller.known_solved)
+        unsolved = poller.known_challenges - solved_names
+        initial_msg = (
+            f"CTF is LIVE. {len(poller.known_challenges)} challenges, "
+            f"{len(solved_names)} solved.\n"
+            f"Unsolved: {sorted(unsolved) if unsolved else 'NONE'}\n"
+            "Fetch challenges and spawn swarms for all unsolved."
+        )
 
-    try:
         await turn_fn(initial_msg)
 
         # Auto-spawn swarms for unsolved challenges if coordinator LLM didn't
@@ -397,7 +400,8 @@ async def run_event_loop(
         if msg_server:
             msg_server.close()
             await msg_server.wait_closed()
-        await poller.stop()
+        if poller is not None:
+            await poller.stop()
         for swarm in deps.swarms.values():
             swarm.kill()
         for task in deps.swarm_tasks.values():
@@ -440,12 +444,16 @@ async def _execute_policy_tick(deps: CoordinatorDeps, poller, now: float) -> lis
 
     from backend.agents.coordinator_core import execute_action
 
-    actions = deps.policy_engine.plan_tick(
-        competition=deps.runtime_state,
-        working_memory_store=deps.working_memory_store,
-        knowledge_store=deps.knowledge_store,
-        now=now,
-    )
+    try:
+        actions = deps.policy_engine.plan_tick(
+            competition=deps.runtime_state,
+            working_memory_store=deps.working_memory_store,
+            knowledge_store=deps.knowledge_store,
+            now=now,
+        )
+    except Exception:
+        logger.exception("Policy planning failed")
+        return []
     action_results: list[tuple[Any, str]] = []
     for action in actions:
         try:
