@@ -10,11 +10,28 @@ import re
 from pathlib import Path
 from urllib.parse import urlparse
 
+from backend.control.actions import (
+    BroadcastKnowledge,
+    BumpSolver,
+    HoldChallenge,
+    MarkChallengeSkipped,
+    RetryChallenge,
+    SpawnSwarm,
+)
 from backend.deps import CoordinatorDeps
 from backend.prompts import ChallengeMeta
 from backend.solve_lifecycle import finalize_swarm_result
 
 logger = logging.getLogger(__name__)
+
+CoordinatorAction = (
+    SpawnSwarm
+    | BumpSolver
+    | BroadcastKnowledge
+    | HoldChallenge
+    | RetryChallenge
+    | MarkChallengeSkipped
+)
 
 
 def _record_skipped_challenge(deps: CoordinatorDeps, challenge_name: str, reason: str) -> None:
@@ -244,6 +261,10 @@ async def do_bump_agent(deps: CoordinatorDeps, challenge_name: str, model_spec: 
     if not solver:
         return f"No solver for {model_spec} in {challenge_name}"
     solver.bump(insights)
+    swarm_state = deps.runtime_state.swarms.get(challenge_name)
+    if swarm_state is not None:
+        swarm_state.last_bump_at = asyncio.get_running_loop().time()
+        swarm_state.bump_count += 1
     return f"Bumped {model_spec} on {challenge_name}"
 
 
@@ -288,10 +309,47 @@ async def do_read_solver_trace(deps: CoordinatorDeps, challenge_name: str, model
         return f"Error reading trace: {e}"
 
 
-async def do_broadcast(deps: CoordinatorDeps, challenge_name: str, message: str) -> str:
+async def do_broadcast(
+    deps: CoordinatorDeps,
+    challenge_name: str,
+    message: str,
+    knowledge_id: str = "",
+) -> str:
     """Broadcast a message to all solvers working on a challenge."""
     swarm = deps.swarms.get(challenge_name)
     if not swarm:
         return f"No swarm running for {challenge_name}"
     await swarm.message_bus.broadcast(message)
+    if knowledge_id:
+        swarm_state = deps.runtime_state.swarms.get(challenge_name)
+        if swarm_state is not None:
+            swarm_state.applied_knowledge_ids.add(knowledge_id)
     return f"Broadcast to all solvers on {challenge_name}"
+
+
+async def execute_action(deps: CoordinatorDeps, action: CoordinatorAction) -> str:
+    if isinstance(action, SpawnSwarm):
+        return await do_spawn_swarm(deps, action.challenge_name)
+    if isinstance(action, BumpSolver):
+        return await do_bump_agent(deps, action.challenge_name, action.model_spec, action.guidance)
+    if isinstance(action, BroadcastKnowledge):
+        return await do_broadcast(
+            deps,
+            action.challenge_name,
+            action.message,
+            knowledge_id=action.knowledge_id,
+        )
+    if isinstance(action, RetryChallenge):
+        return await do_spawn_swarm(deps, action.challenge_name)
+    if isinstance(action, MarkChallengeSkipped):
+        _record_skipped_challenge(deps, action.challenge_name, action.reason)
+        challenge_state = deps.runtime_state.challenges.get(action.challenge_name)
+        if challenge_state is not None:
+            challenge_state.status = "skipped"
+        return f"Challenge '{action.challenge_name}' skipped: {action.reason}"
+    if isinstance(action, HoldChallenge):
+        return (
+            f"Holding challenge '{action.challenge_name}' for "
+            f"{action.retry_after_seconds}s: {action.reason}"
+        )
+    return f"Unhandled action: {action!r}"

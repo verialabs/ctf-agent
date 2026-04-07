@@ -227,6 +227,17 @@ async def run_event_loop(
         poller,
         asyncio.get_event_loop().time(),
     )
+    initial_action_results = await _execute_policy_tick(
+        deps,
+        poller,
+        asyncio.get_event_loop().time(),
+    )
+    if initial_action_results:
+        deps.runtime_state = build_runtime_state_snapshot(
+            deps,
+            poller,
+            asyncio.get_event_loop().time(),
+        )
 
     logger.info(
         "Coordinator starting: %d models, %d challenges, %d solved",
@@ -343,6 +354,18 @@ async def run_event_loop(
                 else:
                     logger.info(f"Event -> coordinator: {status_line}")
 
+            policy_action_results = await _execute_policy_tick(
+                deps,
+                poller,
+                asyncio.get_event_loop().time(),
+            )
+            if policy_action_results:
+                deps.runtime_state = build_runtime_state_snapshot(
+                    deps,
+                    poller,
+                    asyncio.get_event_loop().time(),
+                )
+
             if parts:
                 msg = "\n\n".join(parts)
                 logger.info("Event -> coordinator: %s", msg[:200])
@@ -409,6 +432,26 @@ async def _auto_spawn_one(deps: CoordinatorDeps, challenge_name: str) -> None:
         logger.info(f"Auto-spawn {challenge_name}: {result[:100]}")
     except Exception as e:
         logger.warning(f"Auto-spawn failed for {challenge_name}: {e}")
+
+
+async def _execute_policy_tick(deps: CoordinatorDeps, poller, now: float) -> list[tuple[Any, str]]:
+    if deps.policy_engine is None:
+        return []
+
+    from backend.agents.coordinator_core import execute_action
+
+    actions = deps.policy_engine.plan_tick(
+        competition=deps.runtime_state,
+        working_memory_store=deps.working_memory_store,
+        knowledge_store=deps.knowledge_store,
+        now=now,
+    )
+    action_results: list[tuple[Any, str]] = []
+    for action in actions:
+        result_text = await execute_action(deps, action)
+        logger.info("Policy action executed: %r -> %s", action, result_text)
+        action_results.append((action, result_text))
+    return action_results
 
 
 async def _auto_spawn_unsolved(deps: CoordinatorDeps, poller) -> None:

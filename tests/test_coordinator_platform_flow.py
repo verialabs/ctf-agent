@@ -12,6 +12,7 @@ import backend.agents.coordinator_core as coordinator_core
 import backend.agents.coordinator_loop as coordinator_loop
 import backend.agents.swarm as swarm_module
 from backend.config import Settings
+from backend.control.actions import SpawnSwarm
 from backend.control.state import CompetitionState
 from backend.cost_tracker import AgentUsage, CostTracker
 from backend.ctfd import CTFdClient, SubmitResult
@@ -663,6 +664,75 @@ async def test_run_event_loop_refreshes_runtime_state_each_tick(
     assert result["results"] == {}
     assert len(calls) >= 2
     assert deps.runtime_state is calls[-1]
+
+
+@pytest.mark.asyncio
+async def test_run_event_loop_executes_policy_actions_before_llm_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    platform = FakePlatform()
+    deps = CoordinatorDeps(
+        ctfd=platform,
+        cost_tracker=CostTracker(),
+        settings=make_settings(all_solved_policy="exit"),
+        model_specs=["azure/gpt-5.4"],
+        no_submit=True,
+    )
+    events: list[str] = []
+
+    class FakePolicyEngine:
+        def plan_tick(self, **_: Any) -> list[SpawnSwarm]:
+            return [SpawnSwarm(challenge_name="echo", priority=100, reason="test")]
+
+    class FakePoller:
+        def __init__(self, ctfd: FakePlatform, interval_s: float) -> None:
+            self.ctfd = ctfd
+            self.interval_s = interval_s
+            self.known_challenges = {"echo"}
+            self.known_solved = {"echo"}
+
+        async def start(self) -> None:
+            return None
+
+        async def stop(self) -> None:
+            return None
+
+        async def get_event(self, timeout: float = 1.0) -> None:
+            return None
+
+        def drain_events(self) -> list[Any]:
+            return []
+
+    async def fake_start_msg_server(inbox: asyncio.Queue, port: int = 0) -> None:
+        return None
+
+    async def fake_auto_spawn_unsolved(_deps: CoordinatorDeps, _poller: Any) -> None:
+        return None
+
+    async def fake_spawn_swarm(_deps: CoordinatorDeps, challenge_name: str) -> str:
+        events.append(f"spawn:{challenge_name}")
+        return f"spawned:{challenge_name}"
+
+    async def fake_turn_fn(message: str) -> None:
+        events.append("turn")
+        raise asyncio.CancelledError()
+
+    deps.policy_engine = FakePolicyEngine()
+
+    monkeypatch.setattr(coordinator_loop, "CompetitionPoller", FakePoller)
+    monkeypatch.setattr(coordinator_loop, "_start_msg_server", fake_start_msg_server)
+    monkeypatch.setattr(coordinator_loop, "_auto_spawn_unsolved", fake_auto_spawn_unsolved)
+    monkeypatch.setattr(coordinator_core, "do_spawn_swarm", fake_spawn_swarm)
+
+    await coordinator_loop.run_event_loop(
+        deps=deps,
+        ctfd=platform,
+        cost_tracker=deps.cost_tracker,
+        turn_fn=fake_turn_fn,
+        status_interval=9999,
+    )
+
+    assert events[:2] == ["spawn:echo", "turn"]
 
 
 @pytest.mark.asyncio

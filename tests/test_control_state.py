@@ -9,9 +9,15 @@ from backend.control.actions import (
     RetryChallenge,
     SpawnSwarm,
 )
-from backend.control.state import CompetitionState, SwarmState, build_runtime_state_snapshot
+from backend.control.state import (
+    ChallengeState,
+    CompetitionState,
+    SwarmState,
+    build_runtime_state_snapshot,
+)
 from backend.cost_tracker import AgentUsage, CostTracker
 from backend.deps import CoordinatorDeps
+from backend.prompts import ChallengeMeta
 
 
 def test_competition_state_counts_only_running_swarms() -> None:
@@ -212,6 +218,83 @@ def test_build_runtime_state_snapshot_preserves_terminal_status_without_task() -
 
     assert snapshot.swarms["alpha"].status == "finished"
     assert snapshot.swarms["alpha"].running_models == []
+
+
+def test_build_runtime_state_snapshot_preserves_policy_fields_and_challenge_metadata() -> None:
+    class StubPlatform:
+        pass
+
+    class StubPoller:
+        def __init__(self) -> None:
+            self.known_challenges = {"alpha"}
+            self.known_solved = set()
+
+    class StubSolver:
+        def __init__(self, model_spec: str, step_count: int) -> None:
+            self.model_spec = model_spec
+            self.agent_name = f"solver/{model_spec}"
+            self._step_count = step_count
+
+    class StubSwarm:
+        def __init__(self, solvers: dict[str, StubSolver]) -> None:
+            self.cancel_event = asyncio.Event()
+            self.solvers = solvers
+
+    class StubTask:
+        def done(self) -> bool:
+            return False
+
+    cost_tracker = CostTracker()
+    cost_tracker.by_agent["solver/azure/gpt-5.4"] = AgentUsage(cost_usd=0.75)
+    deps = CoordinatorDeps(
+        ctfd=StubPlatform(),
+        cost_tracker=cost_tracker,
+        settings=Settings(_env_file=None),
+        model_specs=[],
+    )
+    deps.challenge_metas["alpha"] = ChallengeMeta(
+        name="alpha",
+        category="web",
+        value=300,
+        requires_env_start=True,
+    )
+    deps.runtime_state = CompetitionState(
+        challenges={
+            "alpha": ChallengeState(
+                challenge_name="alpha",
+                status="running",
+                category="web",
+                value=300,
+                requires_env_start=True,
+            )
+        },
+        swarms={
+            "alpha": SwarmState(
+                challenge_name="alpha",
+                status="running",
+                running_models=["azure/gpt-5.4"],
+                last_bump_at=11.0,
+                last_progress_at=15.0,
+                step_count=2,
+                cost_usd=0.2,
+                applied_knowledge_ids={"k-1"},
+            )
+        },
+    )
+    deps.swarms["alpha"] = StubSwarm(
+        solvers={"azure/gpt-5.4": StubSolver("azure/gpt-5.4", step_count=5)}
+    )
+    deps.swarm_tasks["alpha"] = StubTask()
+
+    snapshot = build_runtime_state_snapshot(deps, StubPoller(), now=42.0)
+
+    assert snapshot.challenges["alpha"].status == "running"
+    assert snapshot.challenges["alpha"].category == "web"
+    assert snapshot.challenges["alpha"].value == 300
+    assert snapshot.challenges["alpha"].requires_env_start is True
+    assert snapshot.swarms["alpha"].last_bump_at == 11.0
+    assert snapshot.swarms["alpha"].last_progress_at == 42.0
+    assert snapshot.swarms["alpha"].applied_knowledge_ids == {"k-1"}
 
 
 def test_build_runtime_state_snapshot_retains_terminal_state_without_swarm() -> None:
