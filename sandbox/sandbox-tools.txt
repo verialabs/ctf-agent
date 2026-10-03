@@ -109,3 +109,4 @@ PyJWT              JWT encode/decode. import jwt; jwt.encode(payload, key, algor
 - Services on the host are reachable via host.docker.internal (bridge networking).
 - RsaCtfTool is at /opt/RsaCtfTool/
 - CADO-NFS is at /opt/cado-nfs/
+Ret2Shell WSRX endpoints (wss://.../api/traffic/...): use Python's `websocket` module.

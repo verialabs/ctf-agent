@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import Any
 
 
 @dataclass
@@ -15,6 +17,49 @@ class Finding:
 
 
 MAX_FINDINGS = 200
+
+
+class CoordinatorEventType(StrEnum):
+    TASK_QUEUED = "task_queued"
+    TASK_STARTED = "task_started"
+    TASK_BLOCKED = "task_blocked"
+    TASK_SOLVED = "task_solved"
+    TASK_FAILED = "task_failed"
+    HELP_REQUEST = "help_request"
+    HELP_ACCEPTED = "help_accepted"
+    FLAG_CANDIDATE = "flag_candidate"
+
+
+@dataclass(frozen=True)
+class CoordinatorEvent:
+    kind: CoordinatorEventType
+    challenge: str
+    source: str = "coordinator"
+    payload: dict[str, Any] = field(default_factory=dict)
+    timestamp: float = field(default_factory=time.time)
+
+
+@dataclass
+class CoordinatorEventBus:
+    """Typed coordinator events with a bounded audit trail."""
+
+    max_history: int = 500
+    history: list[CoordinatorEvent] = field(default_factory=list)
+    _queue: asyncio.Queue[CoordinatorEvent] = field(default_factory=asyncio.Queue)
+
+    async def publish(self, event: CoordinatorEvent) -> None:
+        self.history.append(event)
+        if len(self.history) > self.max_history:
+            self.history = self.history[-self.max_history :]
+        self._queue.put_nowait(event)
+
+    def drain(self) -> list[CoordinatorEvent]:
+        events: list[CoordinatorEvent] = []
+        while True:
+            try:
+                events.append(self._queue.get_nowait())
+            except asyncio.QueueEmpty:
+                return events
 
 
 @dataclass

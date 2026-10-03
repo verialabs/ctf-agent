@@ -1,0 +1,33 @@
+# Lightweight CTF challenge solver sandbox image.
+# Build: docker build -f sandbox/Dockerfile.sandbox-lite -t ctf-sandbox .
+
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TERM=xterm
+
+RUN sed -i 's|http://archive.ubuntu.com/ubuntu|http://mirrors.aliyun.com/ubuntu|g; s|http://security.ubuntu.com/ubuntu|http://mirrors.aliyun.com/ubuntu|g' /etc/apt/sources.list \
+    && printf 'Acquire::Retries "5";\nAcquire::http::Timeout "60";\nAcquire::https::Timeout "60";\n' > /etc/apt/apt.conf.d/80-retries
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash ca-certificates curl wget git jq zip unzip file xxd bsdmainutils \
+    netcat-openbsd nmap openssl \
+    binutils gdb ltrace strace \
+    gcc g++ make cmake python3 python3-pip python3-dev \
+    ruby ruby-dev default-jre-headless \
+    binwalk foremost sleuthkit exiftool pngcheck imagemagick \
+    ffmpeg sox tesseract-ocr tesseract-ocr-eng \
+    libgmp-dev libmpfr-dev libfplll-dev libz3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel \
+    && pip3 install --no-cache-dir \
+    pwntools pycryptodome sympy gmpy2 requests Pillow z3-solver \
+    pytesseract scipy numpy capstone unicorn ropgadget tqdm flask \
+    volatility3 PyJWT
+
+RUN gem install zsteg
+
+COPY sandbox/sandbox-tools.txt /tools.txt
+
+WORKDIR /challenge

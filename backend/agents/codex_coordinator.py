@@ -22,6 +22,7 @@ from backend.agents.coordinator_core import (
 from backend.agents.coordinator_loop import build_deps, run_event_loop
 from backend.config import Settings
 from backend.deps import CoordinatorDeps
+from backend.executables import resolve_executable
 
 logger = logging.getLogger(__name__)
 
@@ -33,18 +34,18 @@ Your job is to maximize the number of challenges solved while minimizing cost.
 
 Strategy:
 - Spawn swarms for unsolved challenges, prioritizing by solve count (easy first)
+- Respect the configured challenge-slot limit; queued work is started automatically as slots free up
 - Use read_solver_trace to monitor what each solver is doing and where it's stuck
 - When agents are stuck, read their traces, then craft targeted bumps with specific technical guidance
 - Use broadcast to share cross-solver insights (e.g. flag format discovery, shared vulnerabilities)
 
 CRITICAL RULES:
-- NEVER kill a swarm. Solvers will keep trying indefinitely with different approaches.
-  Even when stuck, they often unstick themselves after several bumps. Your job is to
-  HELP them, not give up on them. The only time a swarm should die is when the flag
-  is confirmed correct.
+- Help stuck solvers with evidence-based bumps. The scheduler retries exhausted swarms up to
+  the configured attempt limit, then marks the task blocked and reuses the slot.
+- Kill a swarm only when the challenge was solved elsewhere or an operator requests it.
 - When a solver seems stuck, bump it with very specific technical guidance based on
   its trace. Tell it exactly what to try next — specific tools, techniques, approaches.
-- Cost is not a concern. Keep all swarms running.
+- Prefer useful parallelism over duplicate work and unnecessary cost.
 
 You will receive event messages. Respond with tool calls to manage the competition.
 """
@@ -137,7 +138,7 @@ COORDINATOR_TOOLS = [
 class CodexCoordinator:
     """Coordinator using Codex App Server JSON-RPC."""
 
-    def __init__(self, deps: CoordinatorDeps, model: str = "gpt-5.4") -> None:
+    def __init__(self, deps: CoordinatorDeps, model: str = "gpt-5.5") -> None:
         self.deps = deps
         self.model = model
         self._proc: asyncio.subprocess.Process | None = None
@@ -148,8 +149,9 @@ class CodexCoordinator:
         self._turn_error: str | None = None
 
     async def start(self) -> None:
+        codex_executable = resolve_executable("codex", env_var="CODEX_EXECUTABLE")
         self._proc = await asyncio.create_subprocess_exec(
-            "codex", "app-server",
+            codex_executable, "app-server",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
@@ -329,14 +331,15 @@ async def run_codex_coordinator(
     no_submit: bool = False,
     coordinator_model: str | None = None,
     msg_port: int = 0,
+    allowed_categories: set[str] | None = None,
 ) -> dict[str, Any]:
     """Run the Codex coordinator with the shared event loop."""
     ctfd, cost_tracker, deps = build_deps(
-        settings, model_specs, challenges_root, no_submit,
+        settings, model_specs, challenges_root, no_submit, allowed_categories=allowed_categories,
     )
     deps.msg_port = msg_port
 
-    resolved_model = coordinator_model or "gpt-5.4"
+    resolved_model = coordinator_model or "gpt-5.5"
     coordinator = CodexCoordinator(deps, model=resolved_model)
     await coordinator.start()
 

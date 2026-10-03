@@ -11,7 +11,13 @@ from typing import TYPE_CHECKING
 from backend.agents.solver import Solver
 from backend.cost_tracker import CostTracker
 from backend.ctfd import CTFdClient
-from backend.message_bus import ChallengeMessageBus
+from backend.flag_validation import validate_flag_candidate
+from backend.message_bus import (
+    ChallengeMessageBus,
+    CoordinatorEvent,
+    CoordinatorEventBus,
+    CoordinatorEventType,
+)
 from backend.models import DEFAULT_MODELS, provider_from_spec
 from backend.prompts import ChallengeMeta
 from backend.solver_base import (
@@ -33,14 +39,53 @@ logger = logging.getLogger(__name__)
 # Quota fallback: map subscription-backed providers to API-backed equivalents
 QUOTA_FALLBACK: dict[str, str] = {
     "claude-sdk/claude-opus-4-6": "bedrock/us.anthropic.claude-opus-4-6-v1",
-    "codex/gpt-5.4": "azure/gpt-5.4",
-    "codex/gpt-5.4-mini": "azure/gpt-5.4-mini",
     "codex/gpt-5.3-codex-spark": "zen/gpt-5.3-codex-spark",
 }
 
 
 def _quota_fallback_spec(model_spec: str) -> str | None:
     return QUOTA_FALLBACK.get(model_spec)
+
+
+# Model-to-model fallback for subscription-backed Codex models. gpt-5.6-sol
+# is useful on hard CTF tasks, but can reject cyber tasks or hit usage limits;
+# fall back to the more permissive/available gpt-5.5 automatically.
+MODEL_FALLBACK: dict[str, str] = {
+    "codex/gpt-5.6-sol": "codex/gpt-5.5",
+}
+
+MODEL_FALLBACK_KEYWORDS = (
+    "flagged for possible cybersecurity risk",
+    "trusted access for cyber",
+    "cybersecurity risk",
+    "usage limit",
+    "quota",
+    "rate limit",
+    "capacity",
+    "unsupported service_tier",
+    "refus",
+    "can't assist",
+    "cannot assist",
+    "won't assist",
+    "not able to assist",
+    "not help with",
+    "policy",
+)
+
+
+def _model_fallback_spec(model_spec: str, result: SolverResult) -> str | None:
+    """Return a replacement model for refusal/quota-style model failures."""
+    fallback = MODEL_FALLBACK.get(model_spec)
+    if not fallback:
+        return None
+    if result.status == QUOTA_ERROR:
+        return fallback
+    if result.status not in (ERROR, GAVE_UP):
+        return None
+    text = (result.findings_summary or "").casefold()
+    if any(keyword in text for keyword in MODEL_FALLBACK_KEYWORDS):
+        return fallback
+    return None
 
 
 @dataclass
@@ -55,6 +100,7 @@ class ChallengeSwarm:
     model_specs: list[str] = field(default_factory=lambda: list(DEFAULT_MODELS))
     no_submit: bool = False
     coordinator_inbox: asyncio.Queue | None = None
+    coordinator_event_bus: CoordinatorEventBus | None = None
 
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     solvers: dict[str, SolverProtocol] = field(default_factory=dict)
@@ -120,6 +166,13 @@ class ChallengeSwarm:
                 self.coordinator_inbox.put_nowait(
                     f"[{self.meta.name}/{model_spec}] {message}"
                 )
+            if self.coordinator_event_bus:
+                await self.coordinator_event_bus.publish(CoordinatorEvent(
+                    CoordinatorEventType.HELP_REQUEST,
+                    self.meta.name,
+                    source=model_spec,
+                    payload={"message": message[:1000]},
+                ))
         return _notify
 
     def _create_pydantic_solver(self, model_spec: str, sandbox=None, owns_sandbox: bool | None = None) -> Solver:
@@ -158,7 +211,16 @@ class ChallengeSwarm:
             if self.confirmed_flag:
                 return f"ALREADY SOLVED — flag already confirmed: {self.confirmed_flag}", True
 
-            normalized = flag.strip()
+            valid, reason, normalized = validate_flag_candidate(flag)
+            if not valid:
+                return f"REJECTED — {reason}.", False
+            if self.coordinator_event_bus:
+                await self.coordinator_event_bus.publish(CoordinatorEvent(
+                    CoordinatorEventType.FLAG_CANDIDATE,
+                    self.meta.name,
+                    source=model_spec,
+                    payload={"candidate_length": len(normalized)},
+                ))
 
             # Dedup exact flags across all models
             if normalized in self._submitted_flags:
@@ -196,8 +258,26 @@ class ChallengeSwarm:
         self.solvers[model_spec] = solver
 
         try:
-            result, final_solver = await self._run_solver_loop(solver, model_spec)
+            result, final_solver, final_model_spec = await self._run_solver_loop(solver, model_spec)
             solver = final_solver
+            if result.status == FLAG_FOUND and getattr(self.settings, "generate_writeups", True):
+                try:
+                    from backend.writeup import generate_default_writeup
+
+                    writeup_path = generate_default_writeup(
+                        meta=self.meta,
+                        result=result,
+                        winner_model=final_model_spec,
+                        model_specs=self.model_specs,
+                        findings=self.findings,
+                        challenge_dir=self.challenge_dir,
+                        workspace_dir=getattr(solver.sandbox, "workspace_dir", ""),
+                        output_root=getattr(self.settings, "writeups_dir", "writeups"),
+                        verified=not self.no_submit,
+                    )
+                    logger.info("[%s] Write-up generated: %s", self.meta.name, writeup_path)
+                except Exception:
+                    logger.exception("[%s] Write-up generation failed", self.meta.name)
             return result
         except Exception as e:
             logger.error(f"[{self.meta.name}/{model_spec}] Fatal: {e}", exc_info=True)
@@ -205,8 +285,10 @@ class ChallengeSwarm:
         finally:
             await solver.stop()
 
-    async def _run_solver_loop(self, solver, model_spec: str) -> tuple[SolverResult, SolverProtocol]:
-        """Inner loop: start → run → bump → run → ..."""
+    async def _run_solver_loop(self, solver, model_spec: str) -> tuple[SolverResult, SolverProtocol, str]:
+        """Inner loop: start → run → fallback/bump → run → ..."""
+        current_model_spec = model_spec
+        attempted_fallbacks: set[str] = set()
         bump_count = 0
         consecutive_errors = 0
         result = SolverResult(
@@ -223,33 +305,53 @@ class ChallengeSwarm:
                     and not (result.step_count == 0 and result.cost_usd == 0)
                     and result.findings_summary
                     and not result.findings_summary.startswith(("Error:", "Turn failed:"))):
-                self.findings[model_spec] = result.findings_summary
-                await self.message_bus.post(model_spec, result.findings_summary[:500])
+                self.findings[current_model_spec] = result.findings_summary
+                await self.message_bus.post(current_model_spec, result.findings_summary[:500])
 
             if result.status == FLAG_FOUND:
                 self.cancel_event.set()
                 self.winner = result
                 logger.info(
-                    f"[{self.meta.name}] Flag found by {model_spec}: {result.flag}"
+                    f"[{self.meta.name}] Flag found by {current_model_spec}: {result.flag}"
                 )
-                return result, solver
+                return result, solver, current_model_spec
 
             if result.status == CANCELLED:
                 break
 
+            fallback_spec = _model_fallback_spec(current_model_spec, result)
+            if fallback_spec and fallback_spec not in attempted_fallbacks:
+                attempted_fallbacks.add(fallback_spec)
+                logger.warning(
+                    f"[{self.meta.name}/{current_model_spec}] Model failure/refusal — falling back to {fallback_spec}"
+                )
+                await self.message_bus.post(
+                    current_model_spec,
+                    f"Model failure/refusal; falling back to {fallback_spec}: {result.findings_summary[:500]}",
+                )
+                await solver.stop()
+                solver = self._create_solver(fallback_spec)
+                current_model_spec = fallback_spec
+                self.solvers[current_model_spec] = solver
+                await solver.start()
+                consecutive_errors = 0
+                bump_count = 0
+                continue
+
             # Quota exhaustion: fall back to API-backed Pydantic AI solver
             if result.status == QUOTA_ERROR:
-                fallback_spec = _quota_fallback_spec(model_spec)
+                fallback_spec = _quota_fallback_spec(current_model_spec)
                 if fallback_spec:
                     logger.warning(
-                        f"[{self.meta.name}/{model_spec}] Quota exhausted — falling back to {fallback_spec}"
+                        f"[{self.meta.name}/{current_model_spec}] Quota exhausted — falling back to {fallback_spec}"
                     )
                     existing_sandbox = solver.sandbox
                     # Detach sandbox from old solver so stop() doesn't destroy it
                     solver.sandbox = None  # type: ignore[assignment]
                     await solver.stop()
                     solver = self._create_pydantic_solver(fallback_spec, sandbox=existing_sandbox, owns_sandbox=True)
-                    self.solvers[model_spec] = solver
+                    current_model_spec = fallback_spec
+                    self.solvers[current_model_spec] = solver
                     await solver.start()
                     continue
                 # No fallback available, treat as error
@@ -258,7 +360,7 @@ class ChallengeSwarm:
             if result.status in (GAVE_UP, ERROR):
                 if result.step_count == 0 and result.cost_usd == 0:
                     logger.warning(
-                        f"[{self.meta.name}/{model_spec}] Broken (0 steps, $0) — not bumping"
+                        f"[{self.meta.name}/{current_model_spec}] Broken (0 steps, $0) — not bumping"
                     )
                     break
 
@@ -267,7 +369,7 @@ class ChallengeSwarm:
                     consecutive_errors += 1
                     if consecutive_errors >= 3:
                         logger.warning(
-                            f"[{self.meta.name}/{model_spec}] {consecutive_errors} consecutive errors — giving up"
+                            f"[{self.meta.name}/{current_model_spec}] {consecutive_errors} consecutive errors — giving up"
                         )
                         break
                 else:
@@ -283,14 +385,14 @@ class ChallengeSwarm:
                     break  # cancelled during cooldown
                 except TimeoutError:
                     pass  # cooldown elapsed, proceed with bump
-                insights = self._gather_sibling_insights(model_spec)
+                insights = self._gather_sibling_insights(current_model_spec)
                 solver.bump(insights)
                 logger.info(
-                    f"[{self.meta.name}/{model_spec}] Bumped ({bump_count}), resuming"
+                    f"[{self.meta.name}/{current_model_spec}] Bumped ({bump_count}), resuming"
                 )
                 continue
 
-        return result, solver
+        return result, solver, current_model_spec
 
     async def run(self) -> SolverResult | None:
         """Run all solvers in parallel. Returns the winner's result or None."""

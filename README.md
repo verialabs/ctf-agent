@@ -82,7 +82,7 @@ uv run ctf-solve \
 # Claude SDK coordinator (default)
 uv run ctf-solve --coordinator claude ...
 
-# Codex coordinator (GPT-5.4 via JSON-RPC)
+# Codex coordinator (GPT-5.6 Sol via JSON-RPC)
 uv run ctf-solve --coordinator codex ...
 ```
 
@@ -94,9 +94,26 @@ Default model lineup (configurable in `backend/models.py`):
 |-------|----------|-------|
 | Claude Opus 4.6 (medium) | Claude SDK | Balanced speed/quality |
 | Claude Opus 4.6 (max) | Claude SDK | Deep reasoning |
-| GPT-5.4 | Codex | Best overall solver |
-| GPT-5.4-mini | Codex | Fast, good for easy challenges |
+| GPT-5.6 Sol | Codex | Default Codex coordinator and solver |
 | GPT-5.3-codex | Codex | Reasoning model (xhigh effort) |
+
+DeepSeek's OpenAI-compatible API is also supported. For a lean setup that uses a
+ChatGPT-authenticated Codex coordinator and two DeepSeek solvers per challenge:
+
+```bash
+export DEEPSEEK_API_KEY=your_key_here
+uv run ctf-solve \
+  --coordinator codex \
+  --max-challenges 3 \
+  --models deepseek/deepseek-v4-pro \
+  --models deepseek/deepseek-flash \
+  ...
+```
+
+DeepSeek thinking models are sent `tool_choice=auto`; this keeps bash, file, and
+submission tools available without using the unsupported `required` mode.
+
+Increase `--max-challenges` to 5 after validating local Docker and API capacity.
 
 ## Sandbox Tooling
 
@@ -116,10 +133,30 @@ Each solver gets an isolated Docker container pre-loaded with CTF tools:
 
 - **Multi-model racing** — multiple AI models attack each challenge simultaneously
 - **Auto-spawn** — new challenges detected and attacked automatically
+- **Dynamic task pool** — priority queue backfills reusable challenge slots as work finishes
+- **Task registry** — category, workspace path, attempts, and lifecycle state are visible centrally
+- **Typed event bus** — queue/start/help/block/solve transitions are delivered consistently
 - **Coordinator LLM** — reads solver traces, crafts targeted technical guidance
 - **Cross-solver insights** — findings shared between models via message bus
+- **Flag guardrails** — local placeholder/control-character checks plus deduplicated CTFd verification
 - **Docker sandboxes** — isolated containers with full CTF tooling
 - **Operator messaging** — send hints to running solvers mid-competition
+- **Automatic write-ups** — confirmed solves create a redacted Markdown WP and preserve text solution files
+
+## Automatic Write-ups
+
+Write-up generation is enabled by default. After a solver confirms a flag, the agent writes:
+
+```text
+writeups/<category>/<challenge>/README.md
+writeups/<category>/<challenge>/artifacts/...
+```
+
+The default WP contains challenge metadata, participating and winning models, solver findings,
+reproduction guidance, verification state, flag, and sanitized text files from the winning
+workspace. Common API key, token, cookie, and password forms are redacted.
+
+Use `--writeups-dir PATH` to select another output directory or `--no-writeups` to disable it.
 
 ## Configuration
 
@@ -139,13 +176,53 @@ GEMINI_API_KEY=...
 
 All settings can also be passed as environment variables or CLI flags.
 
+### Ret2Shell platforms
+
+Ret2Shell uses a different API from CTFd. Select its adapter and game explicitly:
+
+```env
+CTF_PLATFORM=ret2shell
+CTFD_URL=https://ctf.example.com
+RET2SHELL_TOKEN=current_bearer_session_token
+RET2SHELL_GAME_ID=37
+RET2SHELL_AUTO_START_INSTANCES=true
+```
+
+The same values can be selected with `--platform ret2shell --game-id 37`. The adapter
+uses `/api/game/...`, downloads attachments, starts a challenge instance when required,
+polls asynchronous flag submissions, handles `Set-Token` rotation in memory, and keeps
+the existing coordinator/swarm interface unchanged.
+
+### CTF+ platforms
+
+CTF+ (`ctfplus.cn`) uses JSON endpoints and a browser token named `mario-token`.
+Select the adapter and competition explicitly:
+
+```env
+CTF_PLATFORM=ctfplus
+CTFD_URL=https://www.ctfplus.cn
+CTFPLUS_TOKEN=current_mario_token
+CTFPLUS_COMPETITION_ID=2105658865197518848
+```
+
+The same values can be selected with
+`--platform ctfplus --ctfd-url https://www.ctfplus.cn --competition-id 2105658865197518848`.
+The adapter polls CTF+ problem lists, downloads visible attachments, starts dynamic
+containers when requested, submits flags through `challenge/submit`, and keeps the
+existing coordinator/swarm interface unchanged.
+
 ## Requirements
 
 - Python 3.14+
 - Docker
-- API keys for at least one provider (Anthropic, OpenAI, Google)
+- API credentials for at least one solver provider (Anthropic, OpenAI, Google, DeepSeek)
+- A ChatGPT or API-key login for Codex-backed solvers/coordinators
 - `codex` CLI (for Codex solver/coordinator)
 - `claude` CLI (bundled with claude-agent-sdk)
+
+The Codex executable is resolved to an absolute path before launch, including the
+versioned location used by Codex Desktop on Windows. Set `CODEX_EXECUTABLE` to an
+explicit executable path when using a custom installation.
 
 ## Acknowledgements
 

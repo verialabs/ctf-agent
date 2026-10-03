@@ -327,12 +327,11 @@ class ClaudeSolver:
                     )
 
                     output = getattr(message, "structured_output", None)
-                    if output:
-                        if output.get("type") == "flag_found":
-                            self._flag = output.get("flag")
-                            self._findings = f"Flag found via {output.get('method', '?')}: {self._flag}"
-                            if self.no_submit:
-                                self._confirmed = True
+                    if output and output.get("type") == "flag_found":
+                        self._flag = output.get("flag")
+                        self._findings = f"Flag found via {output.get('method', '?')}: {self._flag}"
+                        if self.no_submit:
+                            self._confirmed = True
 
             self.tracer.event("turn_complete", duration=round(time.monotonic() - t0, 1), cost=round(self._cost_usd, 4))
 

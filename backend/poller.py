@@ -24,6 +24,7 @@ class CTFdPoller:
     interval_s: float = 5.0
 
     _known_challenges: set[str] = field(default_factory=set)
+    _challenge_details: dict[str, dict] = field(default_factory=dict)
     _known_solved: set[str] = field(default_factory=set)
     _event_queue: asyncio.Queue[PollEvent] = field(default_factory=asyncio.Queue)
     _task: asyncio.Task | None = field(default=None, repr=False)
@@ -43,6 +44,7 @@ class CTFdPoller:
         """Initial fetch — just populate known state, no events."""
         try:
             stubs = await self.ctfd.fetch_challenge_stubs()
+            self._challenge_details = {ch["name"]: ch for ch in stubs}
             self._known_challenges = {ch["name"] for ch in stubs}
             self._known_solved = await self.ctfd.fetch_solved_names()
         except Exception as e:
@@ -82,9 +84,14 @@ class CTFdPoller:
     def known_solved(self) -> set[str]:
         return set(self._known_solved)
 
+    @property
+    def challenge_details(self) -> dict[str, dict]:
+        return {name: dict(details) for name, details in self._challenge_details.items()}
+
     async def _poll_once(self) -> None:
         try:
             stubs = await self.ctfd.fetch_challenge_stubs()
+            current_details = {ch["name"]: ch for ch in stubs}
             current_names = {ch["name"] for ch in stubs}
             current_solved = await self.ctfd.fetch_solved_names()
 
@@ -102,7 +109,7 @@ class CTFdPoller:
             for name in new_challenges:
                 logger.info("New challenge detected: %s", name)
                 self._event_queue.put_nowait(
-                    PollEvent("new_challenge", name)
+                    PollEvent("new_challenge", name, current_details.get(name, {}))
                 )
 
             # Detect newly solved
@@ -114,6 +121,7 @@ class CTFdPoller:
                 )
 
             self._known_challenges = current_names
+            self._challenge_details = current_details
             self._known_solved = current_solved
 
         except Exception as e:

@@ -5,10 +5,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import boto3
+from google.genai.types import ThinkingLevel
 from pydantic_ai.models import Model
 from pydantic_ai.models.bedrock import BedrockConverseModel, BedrockModelSettings
 from pydantic_ai.models.google import GoogleModel, GoogleModelSettings
-from pydantic_ai.models.openai import OpenAIModel, OpenAIModelSettings
+from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
+from pydantic_ai.profiles.openai import OpenAIModelProfile
 from pydantic_ai.providers.bedrock import BedrockProvider
 from pydantic_ai.providers.google import GoogleProvider
 from pydantic_ai.providers.openai import OpenAIProvider
@@ -19,30 +21,29 @@ if TYPE_CHECKING:
 
 # Default model specs — claude-sdk and codex providers use the new solver backends
 DEFAULT_MODELS: list[str] = [
-    "claude-sdk/claude-opus-4-6/medium",
-    "claude-sdk/claude-opus-4-6/max",
-    "codex/gpt-5.4",
-    "codex/gpt-5.4-mini",
-    "codex/gpt-5.3-codex",
+    "codex/gpt-5.5",
+    "deepseek/deepseek-flash",
 ]
 
 # Context window sizes (tokens)
 CONTEXT_WINDOWS: dict[str, int] = {
     "us.anthropic.claude-opus-4-6-v1": 1_000_000,
     "claude-opus-4-6": 1_000_000,
-    "gpt-5.4": 1_000_000,
-    "gpt-5.4-mini": 400_000,
+    "gpt-5.5": 1_000_000,
+    "gpt-5.6-sol": 1_000_000,
     "gpt-5.3-codex": 1_000_000,
     "gpt-5.3-codex-spark": 128_000,
     "gemini-3-flash-preview": 1_000_000,
+    "deepseek-v4-pro": 1_000_000,
+    "deepseek-flash": 1_000_000,
+    "deepseek-v4-flash": 1_000_000,
 }
 
 # Models that support vision
 VISION_MODELS: set[str] = {
     "us.anthropic.claude-opus-4-6-v1",
     "claude-opus-4-6",
-    "gpt-5.4",
-    "gpt-5.4-mini",
+    "gpt-5.6-sol",
     "gemini-3-flash-preview",
 }
 
@@ -69,7 +70,7 @@ def resolve_model(spec: str, settings: Settings) -> Model:
                     provider=BedrockProvider(bedrock_client=client),
                 )
         case "azure":
-            return OpenAIModel(
+            return OpenAIChatModel(
                 model_id,
                 provider=OpenAIProvider(
                     base_url=settings.azure_openai_endpoint,
@@ -77,12 +78,25 @@ def resolve_model(spec: str, settings: Settings) -> Model:
                 ),
             )
         case "zen":
-            return OpenAIModel(
+            return OpenAIChatModel(
                 model_id,
                 provider=OpenAIProvider(
                     base_url="https://opencode.ai/zen/v1",
                     api_key=settings.opencode_zen_api_key,
                 ),
+            )
+        case "deepseek":
+            if not settings.deepseek_api_key:
+                raise ValueError("DEEPSEEK_API_KEY is required for deepseek/* models")
+            return OpenAIChatModel(
+                model_id,
+                provider=OpenAIProvider(
+                    base_url=settings.deepseek_base_url,
+                    api_key=settings.deepseek_api_key,
+                ),
+                # DeepSeek thinking mode rejects tool_choice="required". Pydantic AI
+                # will use "auto" instead while preserving the same callable tools.
+                profile=OpenAIModelProfile(openai_supports_tool_choice_required=False),
             )
         case "google":
             return GoogleModel(
@@ -109,18 +123,18 @@ def resolve_model_settings(spec: str) -> ModelSettings:
                 bedrock_cache_tool_definitions=True,
                 bedrock_cache_messages=True,
             )
-        case "azure" | "zen":
-            # Azure/Zen use OpenAI chat completions — server-side prompt caching
+        case "azure" | "zen" | "deepseek":
+            # These providers use OpenAI-compatible chat completions. Prompt caching
             # is automatic, no explicit config needed. Set max_tokens to avoid
             # reserving the full context window.
-            return OpenAIModelSettings(
+            return OpenAIChatModelSettings(
                 max_tokens=128_000,
             )
         case "google":
             return GoogleModelSettings(
                 max_tokens=64_000,
                 google_thinking_config={
-                    "thinking_level": "high",
+                    "thinking_level": ThinkingLevel.HIGH,
                     "include_thoughts": True,
                 },
             )

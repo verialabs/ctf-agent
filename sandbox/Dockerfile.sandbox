@@ -6,6 +6,10 @@ FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TERM=xterm
 
+# Use a faster Ubuntu mirror and make apt more tolerant of transient mirror errors.
+RUN sed -i 's|http://archive.ubuntu.com/ubuntu|http://mirrors.aliyun.com/ubuntu|g; s|http://security.ubuntu.com/ubuntu|http://mirrors.aliyun.com/ubuntu|g' /etc/apt/sources.list \
+    && printf 'Acquire::Retries "5";\nAcquire::http::Timeout "60";\nAcquire::https::Timeout "60";\n' > /etc/apt/apt.conf.d/80-retries
+
 # ── System packages ───────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y \
     # Networking
@@ -135,5 +139,8 @@ exec python3 /opt/cado-nfs/cado-nfs.py "$@"\n' > /usr/local/bin/cado-nfs \
 
 # ── Tools reference ──────────────────────────────────────────────────────────
 COPY sandbox/sandbox-tools.txt /tools.txt
+
+# Ret2Shell exposes some challenge services through WSRX WebSocket tunnels.
+RUN pip3 install --no-cache-dir websocket-client
 
 WORKDIR /challenge

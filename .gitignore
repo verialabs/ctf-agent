@@ -25,3 +25,8 @@ uv.lock
 workspace/
 codex-schema-*/
 .claude/scheduled_tasks.lock
+# Local verification artifacts and generated write-ups
+artifacts/
+writeups/
+*.png
+runtime_pkgs/
