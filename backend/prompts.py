@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,6 +11,8 @@ from typing import Any
 import yaml
 
 from backend.tools.core import IMAGE_EXTS_FOR_VISION as IMAGE_EXTS
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -177,5 +180,17 @@ def build_prompt(
         "6. Once CORRECT: output `FLAG: <value>` on its own line.",
         "7. Do not guess. Do not ask. Cover maximum surface area.",
     ]
+
+    # 技能库知识注入：按 category + 题面关键词检索 skills/*.json，把同类题的
+    # 打法与「可直接执行」的配方路径拼进 prompt。失败**静默降级**——prompt 构建
+    # 在解题主链路上，缺 skill 只是少点知识，让整题起不来才是真事故。
+    try:
+        from backend.skills_bridge import skills_context
+
+        ctx = skills_context(meta.category, f"{meta.name} {meta.description}")
+        if ctx:
+            lines += [ctx]
+    except Exception as e:  # noqa: BLE001
+        logger.debug("skills_context 注入失败，已跳过: %s", e)
 
     return "\n".join(lines)

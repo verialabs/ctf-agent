@@ -14,6 +14,8 @@ from typing import Any
 
 import aiodocker
 
+from backend.skills_bridge import SKILLS_DIR, SKILLS_DIR_IN_CONTAINER
+
 logger = logging.getLogger(__name__)
 
 CONTAINER_LABEL = "ctf-agent"
@@ -75,6 +77,28 @@ class ExecResult:
     stderr: str
 
 
+def build_binds(workspace_dir: str | Path, challenge_dir: str | Path) -> list[str]:
+    """构造容器的 Bind 挂载列表。
+
+    抽成纯函数是为了能在不起 docker 的情况下单测——挂载漏了 skills/，
+    模型就只能"讲方法论"，可执行配方在容器里根本不存在（属于静默失效，
+    不会有任何报错，只能靠断言兜住）。
+    """
+    challenge_root = Path(challenge_dir).resolve()
+    distfiles = challenge_root / "distfiles"
+    meta_yml = challenge_root / "metadata.yml"
+
+    binds: list[str] = [f"{workspace_dir}:/challenge/workspace:rw"]
+    if distfiles.exists():
+        binds.append(f"{distfiles}:/challenge/distfiles:ro")
+    if meta_yml.exists():
+        binds.append(f"{meta_yml}:/challenge/metadata.yml:ro")
+    # 技能配方目录：缺目录静默跳过（本地精简部署不该因此起不来）
+    if Path(SKILLS_DIR).is_dir():
+        binds.append(f"{Path(SKILLS_DIR)}:{SKILLS_DIR_IN_CONTAINER}:ro")
+    return binds
+
+
 @dataclass
 class DockerSandbox:
     """Isolated Docker container for a single solver agent."""
@@ -112,16 +136,7 @@ class DockerSandbox:
             self._docker = aiodocker.Docker()
 
             self.workspace_dir = tempfile.mkdtemp(prefix="ctf-workspace-")
-
-            challenge_root = Path(self.challenge_dir).resolve()
-            distfiles = str(challenge_root / "distfiles")
-            meta_yml = str(challenge_root / "metadata.yml")
-
-            binds: list[str] = [f"{self.workspace_dir}:/challenge/workspace:rw"]
-            if Path(distfiles).exists():
-                binds.append(f"{distfiles}:/challenge/distfiles:ro")
-            if Path(meta_yml).exists():
-                binds.append(f"{meta_yml}:/challenge/metadata.yml:ro")
+            binds = build_binds(self.workspace_dir, self.challenge_dir)
 
             config = {
                 "Image": self.image,

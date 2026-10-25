@@ -1,0 +1,8 @@
+{
+  "name": "source_audit_patterns",
+  "purpose": "源码审计模式库（可执行型）：离线扫出 pickle.loads / yaml.load / eval / os.system / SSTI / SSRF / 目录穿越 / JWT 验签关闭 / 硬编码密钥，给出 文件:行号:severity；并可生成 pickle 反序列化 RCE 载荷。白盒题先跑它，别让模型临场读源码。",
+  "input_spec": "run({'mode':'scan','paths':['app.py','src/']}) 或 run({'mode':'pickle_payload','cmd':'cat /flag'})",
+  "output_spec": "{ok, count, by_severity, findings:[{file,line,pattern,severity,hint,snippet}]}；无命中返回 ok=False + reason=no_match",
+  "categories": ["web", "misc", "rev", "audit"],
+  "version": "1.0"
+}

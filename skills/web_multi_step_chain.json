@@ -1,0 +1,9 @@
+{
+  "name": "web_multi_step_chain",
+  "purpose": "多步 API/协议链编排（可执行）：串行跑 steps，{{var}} 槽位传参（前步 save 供后步引用），jsonpath-lite 取值，逐步记录 status，自动识别响应体 flag。环境槽位=1 故严格串行不并发；httpx 优先、urllib 回退。",
+  "input_spec": "run({'mode':'exec','base_url':'http://h:p','steps':[{'path':'/login','save':{'token':'data.token'}},{'path':'/flag','headers':{'Authorization':'Bearer {{token}}'},'save':{'flag':'data.flag'}}]})；mode=chain 走原漏洞组合链枚举",
+  "output_spec": "{ok, slots{槽位:值}, flag, steps[{step,method,url,status,saved}]}",
+  "categories": ["web", "misc"],
+  "version": "2.0",
+  "executable": true
+}
