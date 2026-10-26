@@ -132,6 +132,7 @@ class Solver:
             image=getattr(settings, "sandbox_image", "ctf-sandbox"),
             challenge_dir=challenge_dir,
             memory_limit=getattr(settings, "container_memory_limit", "4g"),
+            env={"CTF_TARGET": self.meta.connection_info} if self.meta.connection_info else {},
         )
         self.use_vision = supports_vision(model_spec)
         self.deps = SolverDeps(

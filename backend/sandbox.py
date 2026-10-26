@@ -83,6 +83,7 @@ class DockerSandbox:
     challenge_dir: str
     memory_limit: str = "16g"
     workspace_dir: str = ""
+    env: dict[str, str] = field(default_factory=dict)
     _container: Any = field(default=None, repr=False)
     _docker: Any = field(default=None, repr=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -139,6 +140,10 @@ class DockerSandbox:
                     "NanoCpus": int(2 * 1e9),
                 },
             }
+
+            # 双通道注入：把靶机地址等关键信息写入容器环境变量（prompt 丢失时的兜底）
+            if self.env:
+                config["Env"] = [f"{k}={v}" for k, v in self.env.items()]
 
             self._container = await self._docker.containers.create(config)
             await self._container.start()
