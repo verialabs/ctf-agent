@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import os
 import shlex
+import socket
 import tarfile
 import tempfile
 from dataclasses import dataclass, field
@@ -17,6 +19,9 @@ import aiodocker
 logger = logging.getLogger(__name__)
 
 CONTAINER_LABEL = "ctf-agent"
+# Owner of a container, so a new ctf-solve only cleans up after runs that are gone
+OWNER_PID_LABEL = "ctf-agent.pid"
+OWNER_HOST_LABEL = "ctf-agent.host"
 
 # Concurrency control
 _start_semaphore: asyncio.Semaphore | None = None
@@ -46,8 +51,51 @@ async def _track_stop() -> None:
         _active_count = max(0, _active_count - 1)
 
 
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, owned by another user
+    return True
+
+
+def _other_ctf_solve_running() -> bool:
+    """Whether another ctf-solve process is alive here (Linux /proc; assume yes elsewhere)."""
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return True
+    me = os.getpid()
+    for p in proc.iterdir():
+        if not p.name.isdigit() or int(p.name) == me:
+            continue
+        try:
+            cmdline = (p / "cmdline").read_bytes()
+        except OSError:
+            continue
+        if b"ctf-solve" in cmdline:
+            return True
+    return False
+
+
+def _is_orphan(labels: dict[str, str]) -> bool:
+    """True if no running ctf-solve process owns a container with these labels."""
+    pid = labels.get(OWNER_PID_LABEL, "")
+    if not pid.isdigit():
+        # Created before owner labels existed: only safe to remove when no other run is active
+        return not _other_ctf_solve_running()
+    if labels.get(OWNER_HOST_LABEL) != socket.gethostname():
+        return False  # another machine's run on a shared Docker daemon
+    return not _pid_alive(int(pid))
+
+
 async def cleanup_orphan_containers() -> None:
-    """Kill any leftover ctf-agent containers from a previous run."""
+    """Remove leftover ctf-agent containers whose ctf-solve process is gone.
+
+    Containers of other ctf-solve runs that are still going are left alone, so
+    several runs can share the Docker daemon.
+    """
     try:
         docker = aiodocker.Docker()
         try:
@@ -55,13 +103,20 @@ async def cleanup_orphan_containers() -> None:
                 all=True,
                 filters={"label": [CONTAINER_LABEL]},
             )
+            removed = kept = 0
             for c in containers:
+                if not _is_orphan(c["Labels"] or {}):
+                    kept += 1
+                    continue
                 try:
                     await c.delete(force=True)
+                    removed += 1
                 except Exception:
                     pass
-            if containers:
-                logger.info("Cleaned up %d orphan container(s)", len(containers))
+            if removed:
+                logger.info("Cleaned up %d orphan container(s)", removed)
+            if kept:
+                logger.info("Left %d container(s) of other running ctf-solve processes", kept)
         finally:
             await docker.close()
     except Exception as e:
@@ -128,7 +183,11 @@ class DockerSandbox:
                 "Cmd": ["sleep", "infinity"],
                 "WorkingDir": "/challenge",
                 "Tty": False,
-                "Labels": {CONTAINER_LABEL: "true"},
+                "Labels": {
+                    CONTAINER_LABEL: "true",
+                    OWNER_PID_LABEL: str(os.getpid()),
+                    OWNER_HOST_LABEL: socket.gethostname(),
+                },
                 "HostConfig": {
                     "Binds": binds,
                     "ExtraHosts": ["host.docker.internal:host-gateway"],

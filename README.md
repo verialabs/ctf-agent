@@ -173,6 +173,17 @@ printed at startup.
 - **Live messages:** every run prints a port; `ctf-msg --port <port> "hint"` posts a
   message that every solver receives within about five tool calls.
 
+## Running several challenges at once
+
+Separate `ctf-solve --challenge ...` processes can run side by side. Each sandbox
+container is labelled with the process that created it, and a starting run only
+removes containers whose process is gone. Each run gets its own message port.
+All runs share your Claude/Codex quotas and the Docker host's memory.
+
+```bash
+for d in /work/old_ecw/RSAd /work/old_ecw/SHAlphabet; do ctf-solve --challenge "$d" --no-submit > "$(basename $d).log" 2>&1 & done; wait
+```
+
 ## Provider safety filters
 
 A provider can stop a turn as a safety risk (e.g. OpenAI's "flagged for possible
