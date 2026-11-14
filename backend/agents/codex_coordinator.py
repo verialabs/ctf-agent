@@ -20,8 +20,9 @@ from backend.agents.coordinator_core import (
     do_submit_flag,
 )
 from backend.agents.coordinator_loop import build_deps, run_event_loop
-from backend.config import Settings
+from backend.config import Settings, resolve_cli
 from backend.deps import CoordinatorDeps
+from backend.models import DEFAULT_CODEX_COORDINATOR_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +138,7 @@ COORDINATOR_TOOLS = [
 class CodexCoordinator:
     """Coordinator using Codex App Server JSON-RPC."""
 
-    def __init__(self, deps: CoordinatorDeps, model: str = "gpt-5.4") -> None:
+    def __init__(self, deps: CoordinatorDeps, model: str = DEFAULT_CODEX_COORDINATOR_MODEL) -> None:
         self.deps = deps
         self.model = model
         self._proc: asyncio.subprocess.Process | None = None
@@ -149,7 +150,7 @@ class CodexCoordinator:
 
     async def start(self) -> None:
         self._proc = await asyncio.create_subprocess_exec(
-            "codex", "app-server",
+            resolve_cli(getattr(self.deps.settings, "codex_cli", "codex"), "CODEX_CLI"), "app-server",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
@@ -336,7 +337,7 @@ async def run_codex_coordinator(
     )
     deps.msg_port = msg_port
 
-    resolved_model = coordinator_model or "gpt-5.4"
+    resolved_model = coordinator_model or DEFAULT_CODEX_COORDINATOR_MODEL
     coordinator = CodexCoordinator(deps, model=resolved_model)
     await coordinator.start()
 

@@ -23,6 +23,7 @@ from claude_agent_sdk import (
     TextBlock,
 )
 
+from backend.config import resolve_cli
 from backend.cost_tracker import CostTracker
 from backend.ctfd import CTFdClient
 from backend.loop_detect import LoopDetector
@@ -254,6 +255,8 @@ class ClaudeSolver:
         effort = effort_from_spec(self.model_spec)
 
         options = ClaudeAgentOptions(
+            # Your own `claude` command (login, settings, proxy), not the SDK's bundled copy
+            cli_path=resolve_cli(getattr(self.settings, "claude_cli", "claude"), "CLAUDE_CLI"),
             model=self.model_id,
             system_prompt=system_prompt,
             effort=effort,
@@ -312,6 +315,11 @@ class ClaudeSolver:
 
                 elif isinstance(message, ResultMessage):
                     self._session_id = message.session_id
+                    if message.is_error:
+                        # e.g. "Not logged in", usage limits: the CLI reports these as a
+                        # result, not an exception, so surface the text instead of a silent 0-step run.
+                        logger.error(f"[{self.agent_name}] Claude CLI error: {message.result}")
+                        self._findings = f"Error: {message.result}"
                     turn_cost = getattr(message, "total_cost_usd", 0.0)
                     self._cost_usd += turn_cost
                     msg_usage = getattr(message, "usage", None) or {}

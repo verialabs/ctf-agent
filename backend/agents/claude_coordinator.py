@@ -26,7 +26,7 @@ from backend.agents.coordinator_core import (
     do_submit_flag,
 )
 from backend.agents.coordinator_loop import build_deps, run_event_loop
-from backend.config import Settings
+from backend.config import Settings, resolve_cli
 from backend.deps import CoordinatorDeps
 
 logger = logging.getLogger(__name__)
@@ -147,6 +147,7 @@ async def run_claude_coordinator(
         }
 
     options = ClaudeAgentOptions(
+        cli_path=resolve_cli(settings.claude_cli, "CLAUDE_CLI"),
         model=resolved_model,
         system_prompt=COORDINATOR_PROMPT,
         env={"CLAUDECODE": ""},

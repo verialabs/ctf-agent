@@ -82,21 +82,22 @@ uv run ctf-solve \
 # Claude SDK coordinator (default)
 uv run ctf-solve --coordinator claude ...
 
-# Codex coordinator (GPT-5.4 via JSON-RPC)
+# Codex coordinator (GPT-6.1 Sol via JSON-RPC)
 uv run ctf-solve --coordinator codex ...
 ```
 
 ## Solver Models
 
-Default model lineup (configurable in `backend/models.py`):
+Default model lineup (configurable in `backend/models.py`, or per run with `--models`):
 
 | Model | Provider | Notes |
 |-------|----------|-------|
 | Claude Opus 4.6 (medium) | Claude SDK | Balanced speed/quality |
 | Claude Opus 4.6 (max) | Claude SDK | Deep reasoning |
-| GPT-5.4 | Codex | Best overall solver |
-| GPT-5.4-mini | Codex | Fast, good for easy challenges |
-| GPT-5.3-codex | Codex | Reasoning model (xhigh effort) |
+| GPT-6.1 Sol | Codex | Default model of a ChatGPT-login Codex account |
+
+A ChatGPT-login Codex only accepts the models your account lists; older ids such
+as `gpt-5.4` are rejected. Pick others with e.g. `--models codex/gpt-6-astra`.
 
 ## Sandbox Tooling
 
@@ -139,13 +140,32 @@ GEMINI_API_KEY=...
 
 All settings can also be passed as environment variables or CLI flags.
 
+Settings are read from, lowest to highest priority: `~/.config/ctf-agent/config.env`
+(so an installed `ctf-solve` works from any directory), `./.env`, then environment variables.
+
+### Claude and Codex commands
+
+The `claude-sdk/*` and `codex/*` solvers run your own `claude` and `codex` commands,
+so they use the same logins, settings and proxies as your terminal. No API key is
+needed when both CLIs are logged in.
+
+```env
+# ~/.config/ctf-agent/config.env
+CLAUDE_CLI=claude   # command on PATH or a path
+CODEX_CLI=codex
+```
+
+Shell aliases are invisible to programs: if `claude` is an alias for a wrapper
+(e.g. one that sets `ANTHROPIC_BASE_URL`), set `CLAUDE_CLI` to that wrapper. A
+one-off override is `--claude-cli` / `--codex-cli`. The resolved commands are
+printed at startup.
+
 ## Requirements
 
 - Python 3.14+
 - Docker
-- API keys for at least one provider (Anthropic, OpenAI, Google)
-- `codex` CLI (for Codex solver/coordinator)
-- `claude` CLI (bundled with claude-agent-sdk)
+- Logged-in `claude` CLI (for Claude solvers/coordinator) and/or `codex` CLI (for Codex)
+- API keys only for the API-backed providers (Bedrock, Azure, Zen, Google)
 
 ## Acknowledgements
 

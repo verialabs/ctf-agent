@@ -10,7 +10,7 @@ from pathlib import Path
 import click
 from rich.console import Console
 
-from backend.config import Settings
+from backend.config import Settings, resolve_cli
 from backend.models import DEFAULT_MODELS
 
 console = Console()
@@ -40,6 +40,8 @@ def _setup_logging(verbose: bool = False) -> None:
 @click.option("--coordinator", default="claude", type=click.Choice(["claude", "codex"]), help="Coordinator backend")
 @click.option("--max-challenges", default=10, type=int, help="Max challenges solved concurrently")
 @click.option("--msg-port", default=0, type=int, help="Operator message port (0 = auto)")
+@click.option("--claude-cli", default=None, help="Claude Code command or path (overrides CLAUDE_CLI, default: claude)")
+@click.option("--codex-cli", default=None, help="Codex command or path (overrides CODEX_CLI, default: codex)")
 @click.option("-v", "--verbose", is_flag=True, help="Verbose logging")
 def main(
     ctfd_url: str | None,
@@ -53,6 +55,8 @@ def main(
     coordinator: str,
     max_challenges: int,
     msg_port: int,
+    claude_cli: str | None,
+    codex_cli: str | None,
     verbose: bool,
 ) -> None:
     """CTF Agent — multi-model solver swarm.
@@ -66,13 +70,35 @@ def main(
         settings.ctfd_url = ctfd_url
     if ctfd_token:
         settings.ctfd_token = ctfd_token
+    if claude_cli:
+        settings.claude_cli = claude_cli
+    if codex_cli:
+        settings.codex_cli = codex_cli
     settings.max_concurrent_challenges = max_challenges
 
     model_specs = list(models) if models else list(DEFAULT_MODELS)
 
+    # Resolve the CLIs this run needs now, so a wrong command fails here with a clear message
+    providers = {spec.split("/", 1)[0] for spec in model_specs}
+    if not challenge:
+        providers.add("claude-sdk" if coordinator == "claude" else "codex")
+    cli_paths: dict[str, str] = {}
+    for provider, setting, command in (
+        ("claude-sdk", "CLAUDE_CLI", settings.claude_cli),
+        ("codex", "CODEX_CLI", settings.codex_cli),
+    ):
+        if provider in providers:
+            try:
+                cli_paths[setting] = resolve_cli(command, setting)
+            except RuntimeError as e:
+                console.print(f"[red]{e}[/red]")
+                sys.exit(1)
+
     console.print("[bold]CTF Agent v2[/bold]")
     console.print(f"  CTFd: {settings.ctfd_url}")
     console.print(f"  Models: {', '.join(model_specs)}")
+    for setting, path in cli_paths.items():
+        console.print(f"  {setting}: {path}")
     console.print(f"  Image: {settings.sandbox_image}")
     console.print(f"  Max challenges: {max_challenges}")
     console.print()

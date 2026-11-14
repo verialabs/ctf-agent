@@ -18,13 +18,15 @@ if TYPE_CHECKING:
     from backend.config import Settings
 
 # Default model specs — claude-sdk and codex providers use the new solver backends
+# Codex with a ChatGPT login only serves the account's current lineup (see
+# `codex app-server` model/list); older ids like gpt-5.4 are rejected.
 DEFAULT_MODELS: list[str] = [
     "claude-sdk/claude-opus-4-6/medium",
     "claude-sdk/claude-opus-4-6/max",
-    "codex/gpt-5.4",
-    "codex/gpt-5.4-mini",
-    "codex/gpt-5.3-codex",
+    "codex/gpt-6.1-sol",
 ]
+
+DEFAULT_CODEX_COORDINATOR_MODEL = "gpt-6.1-sol"
 
 # Context window sizes (tokens)
 CONTEXT_WINDOWS: dict[str, int] = {
@@ -44,6 +46,15 @@ VISION_MODELS: set[str] = {
     "gpt-5.4",
     "gpt-5.4-mini",
     "gemini-3-flash-preview",
+    # Codex ChatGPT-account models (inputModalities ["text","image"] per `codex app-server` model/list)
+    "gpt-6.1-sol",
+    "gpt-6.1-terra",
+    "gpt-6-astra",
+    "gpt-6-sol",
+    "gpt-6-luna",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
 }
 
 

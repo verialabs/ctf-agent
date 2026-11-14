@@ -20,6 +20,7 @@ import logging
 import time
 from typing import Any
 
+from backend.config import resolve_cli
 from backend.cost_tracker import CostTracker
 from backend.ctfd import CTFdClient
 from backend.loop_detect import LoopDetector
@@ -184,7 +185,7 @@ class CodexSolver:
         )
 
         self._proc = await asyncio.create_subprocess_exec(
-            "codex", "app-server",
+            resolve_cli(getattr(self.settings, "codex_cli", "codex"), "CODEX_CLI"), "app-server",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
@@ -215,7 +216,8 @@ class CodexSolver:
             "cwd": "/challenge",
             "approvalPolicy": "on-request",
             "sandbox": "read-only",
-            "serviceTier": "flex",
+            # No serviceTier: "flex" is API-only and ChatGPT-login Codex rejects it
+            # (400 "Unsupported service_tier: flex"). Omitted = account default.
             "dynamicTools": SANDBOX_TOOLS,
         }
         # Reasoning effort for models that support it
