@@ -99,6 +99,21 @@ Default model lineup (configurable in `backend/models.py`, or per run with `--mo
 A ChatGPT-login Codex only accepts the models your account lists; older ids such
 as `gpt-5.4` are rejected. Pick others with e.g. `--models codex/gpt-6-astra`.
 
+List the configured defaults and the Codex models available to your account by
+passing `--models` without a value:
+
+```bash
+uv run ctf-solve --models
+```
+
+Repeat the valued form to race a custom lineup:
+
+```bash
+uv run ctf-solve \
+  --models claude-sdk/claude-opus-4-6/max \
+  --models codex/gpt-6-astra
+```
+
 ## Sandbox Tooling
 
 Each solver gets an isolated Docker container pre-loaded with CTF tools:

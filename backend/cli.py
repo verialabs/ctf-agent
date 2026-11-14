@@ -11,9 +11,38 @@ import click
 from rich.console import Console
 
 from backend.config import Settings, resolve_cli
+from backend.model_catalog import render_available_models
 from backend.models import DEFAULT_MODELS
 
 console = Console()
+
+
+def _option_value(args: list[str], name: str) -> str | None:
+    """Return a CLI option value without consuming or otherwise parsing args."""
+    for index, arg in enumerate(args):
+        if arg.startswith(f"{name}="):
+            return arg.split("=", 1)[1]
+        if arg == name and index + 1 < len(args):
+            return args[index + 1]
+    return None
+
+
+class ModelsCommand(click.Command):
+    """Allow bare ``--models`` to act as a model-discovery command."""
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        for index, arg in enumerate(args):
+            bare_models = arg == "--models" and (
+                index + 1 == len(args) or args[index + 1].startswith("-")
+            )
+            if bare_models or arg == "--models=":
+                settings = Settings()
+                codex_cli = _option_value(args, "--codex-cli")
+                if codex_cli:
+                    settings.codex_cli = codex_cli
+                click.echo(render_available_models(settings))
+                ctx.exit()
+        return super().parse_args(ctx, args)
 
 
 def _setup_logging(verbose: bool = False) -> None:
@@ -30,11 +59,15 @@ def _setup_logging(verbose: bool = False) -> None:
     logging.basicConfig(level=level, handlers=[handler], force=True)
 
 
-@click.command()
+@click.command(cls=ModelsCommand)
 @click.option("--ctfd-url", default=None, help="CTFd URL (overrides .env)")
 @click.option("--ctfd-token", default=None, help="CTFd API token (overrides .env)")
 @click.option("--image", default="ctf-sandbox", help="Docker sandbox image name")
-@click.option("--models", multiple=True, help="Model specs (default: all configured)")
+@click.option(
+    "--models",
+    multiple=True,
+    help="Model spec (repeat to race several); omit the value to list available models",
+)
 @click.option("--challenge", default=None, help="Solve a single challenge directory")
 @click.option("--challenges-dir", default="challenges", help="Directory for challenge files")
 @click.option("--no-submit", is_flag=True, help="Dry run — don't submit flags")
