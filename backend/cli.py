@@ -104,7 +104,7 @@ def main(
     console.print()
 
     if challenge:
-        asyncio.run(_run_single(settings, challenge, model_specs, no_submit, max_challenges))
+        asyncio.run(_run_single(settings, challenge, model_specs, no_submit, max_challenges, msg_port))
     else:
         asyncio.run(_run_coordinator(settings, model_specs, challenges_dir, no_submit, coordinator_model, coordinator, max_challenges, msg_port))
 
@@ -115,6 +115,7 @@ async def _run_single(
     model_specs: list[str],
     no_submit: bool,
     max_challenges: int,
+    msg_port: int = 0,
 ) -> None:
     """Run a single challenge with a swarm."""
     from backend.agents.swarm import ChallengeSwarm
@@ -154,6 +155,22 @@ async def _run_single(
         no_submit=no_submit,
     )
 
+    # Operator messages: `ctf-msg --port N "hint"` reaches every solver within ~5 tool calls
+    from backend.agents.coordinator_loop import _start_msg_server
+    inbox: asyncio.Queue = asyncio.Queue()
+    msg_server = await _start_msg_server(inbox, msg_port)
+    if msg_server:
+        port = msg_server.sockets[0].getsockname()[1]
+        console.print(f"[bold]Message the solvers:[/bold] ctf-msg --port {port} \"your hint\"\n")
+
+    async def _relay_operator_messages() -> None:
+        while True:
+            message = await inbox.get()
+            await swarm.message_bus.broadcast(message, source="operator")
+            console.print(f"[cyan]Operator message queued for solvers:[/cyan] {message[:200]}")
+
+    relay_task = asyncio.create_task(_relay_operator_messages())
+
     try:
         result = await swarm.run()
         from backend.solver_base import FLAG_FOUND
@@ -167,6 +184,9 @@ async def _run_single(
             console.print(f"  {agent_name}: {cost_tracker.format_usage(agent_name)}")
         console.print(f"  [bold]Total: ${cost_tracker.total_cost_usd:.2f}[/bold]")
     finally:
+        relay_task.cancel()
+        if msg_server:
+            msg_server.close()
         await ctfd.close()
 
 

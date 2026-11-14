@@ -20,6 +20,7 @@ from claude_agent_sdk import (
     ClaudeSDKClient,
     HookMatcher,
     ResultMessage,
+    SystemMessage,
     TextBlock,
 )
 
@@ -31,7 +32,16 @@ from backend.models import model_id_from_spec
 from backend.output_types import solver_output_json_schema
 from backend.prompts import ChallengeMeta, build_prompt, list_distfiles
 from backend.sandbox import DockerSandbox
-from backend.solver_base import CANCELLED, ERROR, FLAG_FOUND, GAVE_UP, QUOTA_ERROR, SolverResult
+from backend.solver_base import (
+    CANCELLED,
+    ERROR,
+    FLAG_FOUND,
+    GAVE_UP,
+    POLICY_BLOCKED,
+    QUOTA_ERROR,
+    SolverResult,
+    is_policy_block,
+)
 from backend.tracing import SolverTracer
 
 logger = logging.getLogger(__name__)
@@ -73,11 +83,16 @@ class ClaudeSolver:
             memory_limit=getattr(settings, "container_memory_limit", "4g"),
         )
         self.loop_detector = LoopDetector()
-        self.tracer = SolverTracer(meta.name, self.model_id)
-        self.agent_name = f"{meta.name}/{self.model_id}"
+        # Include the effort so medium/max solvers get separate traces and log names
+        from backend.models import effort_from_spec
+        effort = effort_from_spec(model_spec)
+        label = f"{self.model_id}-{effort}" if effort else self.model_id
+        self.tracer = SolverTracer(meta.name, label)
+        self.agent_name = f"{meta.name}/{label}"
 
         self._client: ClaudeSDKClient | None = None
         self._session_id: str | None = None
+        self._policy_blocked = False
         self._container_id: str = ""
         self._step_count = 0
         self._flag: str | None = None
@@ -243,6 +258,7 @@ class ClaudeSolver:
                 from backend.tools.core import do_check_findings
                 findings = await do_check_findings(self.message_bus, self.model_spec)
                 if findings and "No new findings" not in findings:
+                    self.tracer.event("findings_delivered", text=findings[:2000], step=self._step_count)
                     return {
                         "hookSpecificOutput": {
                             "hookEventName": "PostToolUse",
@@ -288,6 +304,7 @@ class ClaudeSolver:
         t0 = time.monotonic()
         cost_before = self._cost_usd
         steps_before = self._step_count
+        self._policy_blocked = False
 
         try:
             if self._bump_insights:
@@ -312,14 +329,20 @@ class ClaudeSolver:
                     for block in message.content:
                         if isinstance(block, TextBlock):
                             self._findings = block.text[:2000]
+                            self.tracer.model_response(block.text, self._step_count)
+
+                elif isinstance(message, SystemMessage) and message.subtype == "init":
+                    self._note_session(message.data.get("session_id"))
 
                 elif isinstance(message, ResultMessage):
-                    self._session_id = message.session_id
+                    self._note_session(message.session_id)
                     if message.is_error:
                         # e.g. "Not logged in", usage limits: the CLI reports these as a
                         # result, not an exception, so surface the text instead of a silent 0-step run.
                         logger.error(f"[{self.agent_name}] Claude CLI error: {message.result}")
                         self._findings = f"Error: {message.result}"
+                    if message.stop_reason == "refusal" or (message.is_error and is_policy_block(message.result)):
+                        self._policy_blocked = True
                     turn_cost = getattr(message, "total_cost_usd", 0.0)
                     self._cost_usd += turn_cost
                     msg_usage = getattr(message, "usage", None) or {}
@@ -350,6 +373,8 @@ class ClaudeSolver:
             # Report per-run metrics so broken-solver detection works
             run_steps = self._step_count - steps_before
             run_cost = self._cost_usd - cost_before
+            if self._policy_blocked:
+                return self._result(POLICY_BLOCKED, run_steps=run_steps, run_cost=run_cost)
             return self._result(GAVE_UP, run_steps=run_steps, run_cost=run_cost)
 
         except asyncio.CancelledError:
@@ -359,9 +384,19 @@ class ClaudeSolver:
             logger.error(f"[{self.agent_name}] Error: {e}", exc_info=True)
             self._findings = f"Error: {e}"
             self.tracer.event("error", error=error_str)
+            if is_policy_block(error_str):
+                return self._result(POLICY_BLOCKED)
             if "quota" in error_str.lower() or "rate" in error_str.lower() or "overloaded" in error_str.lower():
                 return self._result(QUOTA_ERROR)
             return self._result(ERROR)
+
+    def _note_session(self, session_id: str | None) -> None:
+        """Record the CLI session id once. Full transcript lives in the CLI's own store;
+        `<CLAUDE_CLI> --resume <id>` from the same directory reopens it."""
+        if session_id and session_id != self._session_id:
+            logger.info(f"[{self.agent_name}] Claude session {session_id}")
+            self.tracer.event("session", session_id=session_id)
+            self._session_id = session_id
 
     def bump(self, insights: str) -> None:
         self._bump_insights = insights

@@ -160,6 +160,27 @@ Shell aliases are invisible to programs: if `claude` is an alias for a wrapper
 one-off override is `--claude-cli` / `--codex-cli`. The resolved commands are
 printed at startup.
 
+## Watching and talking to solvers
+
+- **Traces:** `./logs/trace-<challenge>-<model>-<time>.jsonl` (in the directory you ran from)
+  records each solver's messages (`model_response`), tool calls and results, delivered
+  findings and its session id (`session`).
+- **Full transcripts:** the CLIs keep their own. Claude: `~/.claude/projects/<run dir>/<session>.jsonl`,
+  Codex: `~/.codex/sessions/<date>/rollout-*-<thread>.jsonl`. The ids are logged at startup.
+  After a run, `<CLAUDE_CLI> --resume <session>` (from the same directory) or
+  `codex resume <thread>` reopens the conversation interactively. Tools then run on
+  your machine, not in the sandbox, so don't let them execute challenge files.
+- **Live messages:** every run prints a port; `ctf-msg --port <port> "hint"` posts a
+  message that every solver receives within about five tool calls.
+
+## Provider safety filters
+
+A provider can stop a turn as a safety risk (e.g. OpenAI's "flagged for possible
+cybersecurity risk"). Such a solver is restarted in a fresh session up to twice
+(after 30s, then 60s); if it is blocked again it stops and the other models carry on.
+For fewer blocks on OpenAI models, apply for OpenAI's cyber access program (the
+link is in the error message).
+
 ## Requirements
 
 - Python 3.14+

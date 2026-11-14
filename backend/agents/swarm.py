@@ -19,6 +19,7 @@ from backend.solver_base import (
     ERROR,
     FLAG_FOUND,
     GAVE_UP,
+    POLICY_BLOCKED,
     QUOTA_ERROR,
     SolverProtocol,
     SolverResult,
@@ -149,6 +150,10 @@ class ChallengeSwarm:
                 parts.append(f"[{model}]: {finding}")
         return "\n\n".join(parts) if parts else "No sibling insights available yet."
 
+    # Fresh-session restarts after a provider safety-filter block (per model, per challenge)
+    MAX_POLICY_RESTARTS = 2
+    POLICY_RESTART_DELAY_S = 30  # x restart number: 30s, then 60s
+
     # Escalating cooldowns after incorrect submissions (per model)
     SUBMISSION_COOLDOWNS = [0, 30, 120, 300, 600]  # 0s, 30s, 2min, 5min, 10min
 
@@ -209,6 +214,7 @@ class ChallengeSwarm:
         """Inner loop: start → run → bump → run → ..."""
         bump_count = 0
         consecutive_errors = 0
+        policy_restarts = 0
         result = SolverResult(
             flag=None, status=CANCELLED, findings_summary="",
             step_count=0, cost_usd=0.0, log_path="",
@@ -219,7 +225,7 @@ class ChallengeSwarm:
             result = await solver.run_until_done_or_gave_up()
 
             # Only broadcast useful findings — skip errors and broken solvers
-            if (result.status not in (ERROR, QUOTA_ERROR)
+            if (result.status not in (ERROR, QUOTA_ERROR, POLICY_BLOCKED)
                     and not (result.step_count == 0 and result.cost_usd == 0)
                     and result.findings_summary
                     and not result.findings_summary.startswith(("Error:", "Turn failed:"))):
@@ -254,6 +260,38 @@ class ChallengeSwarm:
                     continue
                 # No fallback available, treat as error
                 break
+
+            # Provider safety filter (e.g. OpenAI cyber classifier): these misfire on CTF
+            # work, and both providers say to retry in a new session. Restart a bounded
+            # number of times, then leave the challenge to the other models.
+            if result.status == POLICY_BLOCKED:
+                if policy_restarts >= self.MAX_POLICY_RESTARTS:
+                    logger.error(
+                        f"[{self.meta.name}/{model_spec}] Blocked by the provider's safety filter "
+                        f"{policy_restarts + 1} times — stopping this model. "
+                        f"{result.findings_summary.removeprefix('Error: ')}"
+                    )
+                    break
+                policy_restarts += 1
+                delay = self.POLICY_RESTART_DELAY_S * policy_restarts
+                logger.warning(
+                    f"[{self.meta.name}/{model_spec}] Flagged by the provider's safety filter — "
+                    f"restarting in a fresh session in {delay}s "
+                    f"({policy_restarts}/{self.MAX_POLICY_RESTARTS})"
+                )
+                try:
+                    await asyncio.wait_for(self.cancel_event.wait(), timeout=delay)
+                    break  # cancelled during cooldown
+                except TimeoutError:
+                    pass
+                await solver.stop()
+                solver = self._create_solver(model_spec)
+                self.solvers[model_spec] = solver
+                await solver.start()
+                insights = self._gather_sibling_insights(model_spec)
+                if not insights.startswith("No sibling insights"):
+                    solver.bump(insights)
+                continue
 
             if result.status in (GAVE_UP, ERROR):
                 if result.step_count == 0 and result.cost_usd == 0:

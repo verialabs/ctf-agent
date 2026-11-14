@@ -28,7 +28,16 @@ from backend.models import model_id_from_spec, supports_vision
 from backend.output_types import solver_output_json_schema
 from backend.prompts import ChallengeMeta, build_prompt, list_distfiles
 from backend.sandbox import DockerSandbox
-from backend.solver_base import CANCELLED, ERROR, FLAG_FOUND, GAVE_UP, QUOTA_ERROR, SolverResult
+from backend.solver_base import (
+    CANCELLED,
+    ERROR,
+    FLAG_FOUND,
+    GAVE_UP,
+    POLICY_BLOCKED,
+    QUOTA_ERROR,
+    SolverResult,
+    is_policy_block,
+)
 from backend.tools.core import (
     do_bash,
     do_list_files,
@@ -230,6 +239,8 @@ class CodexSolver:
 
         self.tracer.event("start", challenge=self.meta.name, model=self.model_id)
         logger.info(f"[{self.agent_name}] Codex solver started (thread={self._thread_id})")
+        # Full transcript: ~/.codex/sessions/<date>/rollout-*-<thread>.jsonl
+        self.tracer.event("session", thread_id=self._thread_id)
 
     async def _rpc(self, method: str, params: dict | None = None) -> dict:
         assert self._proc and self._proc.stdin
@@ -304,6 +315,7 @@ class CodexSolver:
                     phase = item.get("phase")  # "commentary" | "final_answer" | null
                     if text:
                         self._findings = text[:2000]
+                        self.tracer.model_response(text, self._step_count)
                         if phase != "commentary" and text.lstrip()[:1] == "{":
                             try:
                                 parsed = json.loads(text)
@@ -413,6 +425,7 @@ class CodexSolver:
                 findings = await do_check_findings(self.message_bus, self.model_spec)
                 if findings and "No new findings" not in findings:
                     result_text = f"{result_text}\n\n---\n{findings}"
+                    self.tracer.event("findings_delivered", text=findings[:2000], step=self._step_count)
 
             content_items = [{"type": "inputText", "text": result_text}]
 
@@ -493,6 +506,9 @@ class CodexSolver:
 
             if self._turn_error:
                 err = self._turn_error.lower()
+                if is_policy_block(err):
+                    self._findings = f"Error: {self._turn_error}"
+                    return self._result(POLICY_BLOCKED)
                 # Context overflow is terminal — don't fallback, just error
                 if "context_length" in err or "context window" in err:
                     return self._result(ERROR)
@@ -518,6 +534,8 @@ class CodexSolver:
             logger.error(f"[{self.agent_name}] Error: {e}", exc_info=True)
             self._findings = f"Error: {e}"
             self.tracer.event("error", error=error_str)
+            if is_policy_block(error_str):
+                return self._result(POLICY_BLOCKED)
             if "quota" in error_str.lower() or "rate" in error_str.lower():
                 return self._result(QUOTA_ERROR)
             return self._result(ERROR)
