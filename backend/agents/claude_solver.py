@@ -139,6 +139,18 @@ class ClaudeSolver:
             )
         return display
 
+    def _sync_reported_cost(self, cost_usd: float | None) -> None:
+        """Synchronize Claude's authoritative cumulative session cost."""
+        if cost_usd is None:
+            return
+        self._cost_usd = cost_usd
+        self.cost_tracker.set_reported_cost(
+            self.agent_name,
+            cost_usd,
+            self.model_id,
+            provider_spec="claude-sdk",
+        )
+
     async def start(self) -> None:
         await self.sandbox.start()
 
@@ -387,7 +399,11 @@ class ClaudeSolver:
                     if message.usage:
                         total = _claude_usage(message.usage)
                         self._record_usage(*(max(0, t - c) for t, c in zip(total, self._turn_usage, strict=True)))
-                    self._cost_usd += message.total_cost_usd or 0.0
+                    if message.total_cost_usd is not None:
+                        # Claude reports the cumulative cost for this long-lived session,
+                        # not a per-turn delta. Treat it as authoritative: aliases such as
+                        # "opus" cannot be priced reliably by the local model catalog.
+                        self._sync_reported_cost(message.total_cost_usd)
 
                     output = getattr(message, "structured_output", None)
                     if output and output.get("type") == "flag_found":
@@ -431,6 +447,9 @@ class ClaudeSolver:
             cache_read_tokens=cache_read,
             cache_write_tokens=cache_write,
             provider_spec="claude-sdk",
+            # ResultMessage.total_cost_usd is authoritative and is synchronized
+            # separately; do not try to price aliases such as "opus" here.
+            cost_usd=0.0,
         )
         done = self._turn_usage
         self._turn_usage = (done[0] + input_tokens, done[1] + cache_read, done[2] + cache_write, done[3] + output_tokens)

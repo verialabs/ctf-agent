@@ -136,6 +136,7 @@ class CostTracker:
         provider_spec: str = "",
         duration_seconds: float = 0.0,
         cache_write_tokens: int = 0,
+        cost_usd: float | None = None,
     ) -> None:
         """Record token usage without requiring pydantic_ai.RunUsage.
 
@@ -148,7 +149,14 @@ class CostTracker:
             cache_read_tokens=cache_read_tokens,
             cache_write_tokens=cache_write_tokens,
         )
-        self.record(agent_name, usage, model_name, provider_spec, duration_seconds)
+        self.record(
+            agent_name,
+            usage,
+            model_name,
+            provider_spec,
+            duration_seconds,
+            cost_usd=cost_usd,
+        )
 
     def record(
         self,
@@ -157,8 +165,9 @@ class CostTracker:
         model_name: str,
         provider_spec: str = "",
         duration_seconds: float = 0.0,
+        cost_usd: float | None = None,
     ) -> None:
-        cost = calc_cost(usage, model_name, provider_spec)
+        cost = calc_cost(usage, model_name, provider_spec) if cost_usd is None else cost_usd
 
         if agent_name not in self.by_agent:
             self.by_agent[agent_name] = AgentUsage(
@@ -176,6 +185,21 @@ class CostTracker:
             f"{_fmt_tokens(usage.cache_read_tokens)} cached ({_cache_rate(usage)} hit) / "
             f"{_fmt_tokens(usage.output_tokens)} out | ${cost:.4f} | {duration_seconds:.1f}s"
         )
+
+    def set_reported_cost(
+        self,
+        agent_name: str,
+        cost_usd: float,
+        model_name: str,
+        provider_spec: str = "",
+    ) -> None:
+        """Set an authoritative cumulative cost reported by a provider."""
+        if agent_name not in self.by_agent:
+            self.by_agent[agent_name] = AgentUsage(
+                model_name=model_name,
+                provider_spec=provider_spec,
+            )
+        self.by_agent[agent_name].cost_usd = cost_usd
 
     @property
     def total_cost_usd(self) -> float:

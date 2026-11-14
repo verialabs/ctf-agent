@@ -2,6 +2,7 @@ import asyncio
 from typing import Any
 
 from backend.agents.claude_solver import _HOST_SAFE_TOOLS, ClaudeSolver
+from backend.cost_tracker import CostTracker
 
 
 class RecordingTracer:
@@ -62,3 +63,18 @@ def test_structured_output_is_the_only_extra_host_safe_tool():
     assert "Read" not in _HOST_SAFE_TOOLS
     assert "Write" not in _HOST_SAFE_TOOLS
     assert "Edit" not in _HOST_SAFE_TOOLS
+
+
+def test_claude_reported_cost_replaces_cumulative_total():
+    solver = make_solver(no_submit=True)
+    solver.agent_name = "challenge/opus"
+    solver.model_id = "opus"
+    solver.cost_tracker = CostTracker()
+    solver._cost_usd = 0.0
+
+    # The second value is cumulative and must replace, rather than add to, the first.
+    solver._sync_reported_cost(0.25)
+    solver._sync_reported_cost(0.40)
+
+    assert solver._cost_usd == 0.40
+    assert solver.cost_tracker.total_cost_usd == 0.40
