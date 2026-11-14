@@ -4,10 +4,62 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+import subprocess
+from pathlib import Path
 from typing import Any
 
 from backend.config import Settings, resolve_cli
 from backend.models import DEFAULT_MODELS
+
+
+def _claude_help(command: str) -> str:
+    executable = resolve_cli(command, "CLAUDE_CLI")
+    result = subprocess.run(
+        [executable, "--help"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(detail or f"Claude CLI exited with status {result.returncode}")
+    return f"{result.stdout}\n{result.stderr}"
+
+
+def _parse_claude_help(help_text: str) -> tuple[list[str], list[str]]:
+    model_block = re.search(r"--model <model>(.{0,500})", help_text, flags=re.DOTALL)
+    aliases = (
+        re.findall(r"'([^']+)'", model_block.group(1).split("model's full name", 1)[0])
+        if model_block
+        else []
+    )
+
+    effort_block = re.search(r"--effort <level>(.{0,300})", help_text, flags=re.DOTALL)
+    effort_match = re.search(r"\(([^)]+)\)", effort_block.group(1)) if effort_block else None
+    efforts = (
+        [effort.strip() for effort in effort_match.group(1).split(",") if effort.strip()]
+        if effort_match
+        else []
+    )
+    return aliases, efforts
+
+
+def discover_claude_models(command: str) -> tuple[list[str], list[str]]:
+    """Return aliases and efforts advertised by Claude Code or its configured wrapper."""
+    help_text = _claude_help(command)
+    aliases, efforts = _parse_claude_help(help_text)
+    if aliases:
+        return aliases, efforts
+
+    executable = resolve_cli(command, "CLAUDE_CLI")
+    if Path(executable).name != "claude":
+        aliases, efforts = _parse_claude_help(_claude_help("claude"))
+        if aliases:
+            return aliases, efforts
+
+    raise RuntimeError("Claude CLI did not advertise any model aliases")
 
 
 async def _codex_rpc(
@@ -91,6 +143,16 @@ def render_available_models(settings: Settings) -> str:
     """Render configured defaults and models available through local provider CLIs."""
     lines = ["Configured defaults:"]
     lines.extend(f"  {spec}" for spec in DEFAULT_MODELS)
+
+    lines.extend(["", "Claude models advertised by the local CLI:"])
+    try:
+        aliases, efforts = discover_claude_models(settings.claude_cli)
+    except Exception as exc:
+        lines.append(f"  unavailable ({exc})")
+    else:
+        effort_text = f" [{', '.join(efforts)}]" if efforts else ""
+        lines.extend(f"  claude-sdk/{alias}{effort_text}" for alias in aliases)
+        lines.append("  Full model IDs are also accepted by Claude Code.")
 
     lines.extend(["", "Codex models available to this account:"])
     try:

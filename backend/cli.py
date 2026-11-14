@@ -37,7 +37,10 @@ class ModelsCommand(click.Command):
             )
             if bare_models or arg == "--models=":
                 settings = Settings()
+                claude_cli = _option_value(args, "--claude-cli")
                 codex_cli = _option_value(args, "--codex-cli")
+                if claude_cli:
+                    settings.claude_cli = claude_cli
                 if codex_cli:
                     settings.codex_cli = codex_cli
                 click.echo(render_available_models(settings))

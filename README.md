@@ -99,8 +99,9 @@ Default model lineup (configurable in `backend/models.py`, or per run with `--mo
 A ChatGPT-login Codex only accepts the models your account lists; older ids such
 as `gpt-5.4` are rejected. Pick others with e.g. `--models codex/gpt-6-astra`.
 
-List the configured defaults and the Codex models available to your account by
-passing `--models` without a value:
+List the configured defaults, Claude aliases advertised by your local CLI,
+and the Codex models available to your account by passing `--models` without a
+value:
 
 ```bash
 uv run ctf-solve --models
