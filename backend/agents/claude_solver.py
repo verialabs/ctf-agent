@@ -47,6 +47,16 @@ from backend.tracing import SolverTracer
 logger = logging.getLogger(__name__)
 
 
+def _claude_usage(u: dict) -> tuple[int, int, int, int]:
+    """Anthropic usage -> (total input, cache read, cache write, output).
+
+    Anthropic's input_tokens excludes cached tokens; the cost tracker wants the total.
+    """
+    read = u.get("cache_read_input_tokens") or 0
+    write = u.get("cache_creation_input_tokens") or 0
+    return (u.get("input_tokens") or 0) + read + write, read, write, u.get("output_tokens") or 0
+
+
 class ClaudeSolver:
     """Claude Agent SDK solver using native tools redirected to Docker sandbox."""
 
@@ -93,6 +103,8 @@ class ClaudeSolver:
         self._client: ClaudeSDKClient | None = None
         self._session_id: str | None = None
         self._policy_blocked = False
+        self._counted_msg_ids: set[str] = set()
+        self._turn_usage: tuple[int, int, int, int] = (0, 0, 0, 0)
         self._container_id: str = ""
         self._step_count = 0
         self._flag: str | None = None
@@ -213,6 +225,9 @@ class ClaudeSolver:
                         "updatedInput": {
                             **tool_input,
                             "command": rewritten,
+                            # Background output goes to a file on the host, which the model
+                            # can only look for inside the container: run in the foreground.
+                            "run_in_background": False,
                         },
                     }
                 }
@@ -305,6 +320,7 @@ class ClaudeSolver:
         cost_before = self._cost_usd
         steps_before = self._step_count
         self._policy_blocked = False
+        self._turn_usage = (0, 0, 0, 0)  # input, cache read, cache write, output recorded this turn
 
         try:
             if self._bump_insights:
@@ -330,6 +346,13 @@ class ClaudeSolver:
                         if isinstance(block, TextBlock):
                             self._findings = block.text[:2000]
                             self.tracer.model_response(block.text, self._step_count)
+                    # Count tokens per API response as it arrives (like Codex), so usage shows
+                    # live and survives cancellation. One response arrives as several messages
+                    # (one per content block) carrying the same id and usage: count it once.
+                    # Its output count is not final yet; the turn total below tops it up.
+                    if message.usage and message.message_id and message.message_id not in self._counted_msg_ids:
+                        self._counted_msg_ids.add(message.message_id)
+                        self._record_usage(*_claude_usage(message.usage))
 
                 elif isinstance(message, SystemMessage) and message.subtype == "init":
                     self._note_session(message.data.get("session_id"))
@@ -343,19 +366,12 @@ class ClaudeSolver:
                         self._findings = f"Error: {message.result}"
                     if message.stop_reason == "refusal" or (message.is_error and is_policy_block(message.result)):
                         self._policy_blocked = True
-                    turn_cost = getattr(message, "total_cost_usd", 0.0)
-                    self._cost_usd += turn_cost
-                    msg_usage = getattr(message, "usage", None) or {}
-                    if not isinstance(msg_usage, dict):
-                        msg_usage = vars(msg_usage) if hasattr(msg_usage, "__dict__") else {}
-                    self.cost_tracker.record_tokens(
-                        self.agent_name, self.model_id,
-                        input_tokens=msg_usage.get("input_tokens", 0),
-                        output_tokens=msg_usage.get("output_tokens", 0),
-                        cache_read_tokens=msg_usage.get("cache_read_input_tokens", msg_usage.get("cache_read_tokens", 0)),
-                        provider_spec="claude-sdk",
-                        duration_seconds=time.monotonic() - t0,
-                    )
+                    # The turn total sums all its API calls with final output counts: record
+                    # whatever the per-response counts above missed.
+                    if message.usage:
+                        total = _claude_usage(message.usage)
+                        self._record_usage(*(max(0, t - c) for t, c in zip(total, self._turn_usage, strict=True)))
+                    self._cost_usd += message.total_cost_usd or 0.0
 
                     output = getattr(message, "structured_output", None)
                     if output:
@@ -389,6 +405,20 @@ class ClaudeSolver:
             if "quota" in error_str.lower() or "rate" in error_str.lower() or "overloaded" in error_str.lower():
                 return self._result(QUOTA_ERROR)
             return self._result(ERROR)
+
+    def _record_usage(self, input_tokens: int, cache_read: int, cache_write: int, output_tokens: int) -> None:
+        if not (input_tokens or output_tokens):
+            return
+        self.cost_tracker.record_tokens(
+            self.agent_name, self.model_id,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read,
+            cache_write_tokens=cache_write,
+            provider_spec="claude-sdk",
+        )
+        done = self._turn_usage
+        self._turn_usage = (done[0] + input_tokens, done[1] + cache_read, done[2] + cache_write, done[3] + output_tokens)
 
     def _note_session(self, session_id: str | None) -> None:
         """Record the CLI session id once. Full transcript lives in the CLI's own store;

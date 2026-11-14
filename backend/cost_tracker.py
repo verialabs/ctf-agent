@@ -135,12 +135,18 @@ class CostTracker:
         cache_read_tokens: int = 0,
         provider_spec: str = "",
         duration_seconds: float = 0.0,
+        cache_write_tokens: int = 0,
     ) -> None:
-        """Record token usage without requiring pydantic_ai.RunUsage."""
+        """Record token usage without requiring pydantic_ai.RunUsage.
+
+        input_tokens is the total input, including cache reads and writes (Pydantic AI's
+        convention); the cache counts are the parts of it billed at cache prices.
+        """
         usage = RunUsage(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
         )
         self.record(agent_name, usage, model_name, provider_spec, duration_seconds)
 

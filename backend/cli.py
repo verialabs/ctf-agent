@@ -23,6 +23,8 @@ def _setup_logging(verbose: bool = False) -> None:
     logging.getLogger("botocore").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("aiodocker").setLevel(logging.WARNING)
+    # e.g. "Skipping unknown message type: tool_progress" for every running command
+    logging.getLogger("claude_agent_sdk").setLevel(logging.INFO)
     handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)-8s %(message)s", datefmt="%X"))
     logging.basicConfig(level=level, handlers=[handler], force=True)
