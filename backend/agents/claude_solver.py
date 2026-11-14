@@ -46,6 +46,8 @@ from backend.tracing import SolverTracer
 
 logger = logging.getLogger(__name__)
 
+_HOST_SAFE_TOOLS = frozenset({"WebFetch", "WebSearch", "StructuredOutput"})
+
 
 def _claude_usage(u: dict) -> tuple[int, int, int, int]:
     """Anthropic usage -> (total input, cache read, cache write, output).
@@ -113,6 +115,30 @@ class ClaudeSolver:
         self._cost_usd = 0.0
         self._bump_insights: str | None = None
 
+    async def _submit_flag_command(self, flag: str, step: int) -> str:
+        """Handle the synthetic submit_flag shell command and record confirmation."""
+        if self.no_submit:
+            display = f'DRY RUN — would submit "{flag}"'
+            confirmed = True
+        elif self.submit_fn:
+            display, confirmed = await self.submit_fn(flag)
+        else:
+            from backend.tools.core import do_submit_flag
+
+            display, confirmed = await do_submit_flag(self.ctfd, self.meta.name, flag)
+
+        if confirmed:
+            self._confirmed = True
+            self._flag = flag
+            self._findings = f"Flag found via submit_flag: {flag}"
+            self.tracer.event(
+                "flag_confirmed",
+                flag=flag,
+                step=step,
+                dry_run=self.no_submit,
+            )
+        return display
+
     async def start(self) -> None:
         await self.sandbox.start()
 
@@ -176,19 +202,7 @@ class ClaudeSolver:
                 flag_match = re.match(r"submit_flag\s+['\"]?(.+?)['\"]?\s*$", command.strip())
                 if flag_match:
                     flag_val = flag_match.group(1).strip()
-                    if self.no_submit:
-                        result_msg = f'DRY RUN — would submit "{flag_val}"'
-                    else:
-                        if self.submit_fn:
-                            display, confirmed = await self.submit_fn(flag_val)
-                        else:
-                            from backend.tools.core import do_submit_flag
-                            display, confirmed = await do_submit_flag(self.ctfd, self.meta.name, flag_val)
-                        result_msg = display
-                        if confirmed:
-                            self._confirmed = True
-                            self._flag = flag_val
-                            self.tracer.event("flag_confirmed", flag=flag_val, step=self._step_count)
+                    result_msg = await self._submit_flag_command(flag_val, self._step_count)
                     # Rewrite to an echo so Bash returns the submission result
                     return {
                         "hookSpecificOutput": {
@@ -235,7 +249,9 @@ class ClaudeSolver:
                     result["systemMessage"] = warn_msg
                 return result
 
-            if tool_name in ("WebFetch", "WebSearch"):
+            # Web tools are already sandbox-neutral. StructuredOutput is the SDK's
+            # internal result-reporting tool and cannot access the host filesystem.
+            if tool_name in _HOST_SAFE_TOOLS:
                 return {"systemMessage": warn_msg} if warn_msg else {}
 
             # Everything else is denied — Glob/Grep/Read/Write/Edit/Agent/etc.
@@ -374,12 +390,11 @@ class ClaudeSolver:
                     self._cost_usd += message.total_cost_usd or 0.0
 
                     output = getattr(message, "structured_output", None)
-                    if output:
-                        if output.get("type") == "flag_found":
-                            self._flag = output.get("flag")
-                            self._findings = f"Flag found via {output.get('method', '?')}: {self._flag}"
-                            if self.no_submit:
-                                self._confirmed = True
+                    if output and output.get("type") == "flag_found":
+                        self._flag = output.get("flag")
+                        self._findings = f"Flag found via {output.get('method', '?')}: {self._flag}"
+                        if self.no_submit:
+                            self._confirmed = True
 
             self.tracer.event("turn_complete", duration=round(time.monotonic() - t0, 1), cost=round(self._cost_usd, 4))
 
